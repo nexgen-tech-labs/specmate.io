@@ -42,6 +42,12 @@ enum SourceStatus {
   FAILED
 }
 
+enum ScanStatus {
+  PENDING
+  CLEAN
+  INFECTED
+}
+
 enum DraftItemType {
   EPIC
   STORY
@@ -75,11 +81,15 @@ enum InviteStatus {
 }
 
 model Workspace {
-  id        String    @id @default(cuid())
-  name      String
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  deletedAt DateTime?
+  id             String    @id @default(cuid())
+  name           String
+  // Manually-set placeholder for the workspace's subscription revenue, used only to
+  // compute an AI cost-to-revenue ratio (Issue #1.6). No real billing system yet —
+  // set directly in the DB, no self-serve UI.
+  planRevenueUsd Decimal?  @db.Decimal(10, 2)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
 
   members     WorkspaceMember[]
   projects    Project[]
@@ -137,6 +147,12 @@ model Source {
   kind       SourceKind
   status     SourceStatus @default(QUEUED)
   storageKey String?
+  sizeBytes  Int?
+  mimeType   String?
+  // Always PENDING -> CLEAN today (see apps/web/src/lib/upload-validation.ts#scanFile) — no real
+  // AV integration exists yet. INFECTED is modeled now so the schema doesn't need a follow-up
+  // migration once a real scanner is wired up.
+  scanStatus ScanStatus   @default(PENDING)
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
   deletedAt  DateTime?

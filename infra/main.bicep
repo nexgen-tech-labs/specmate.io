@@ -85,6 +85,32 @@ resource containerAppIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@
   location: location
 }
 
+// Blob storage for uploaded Source files (Issue #7). Blob-only StorageV2, cheapest redundancy
+// tier — fine for early-stage document uploads, revisit if durability requirements change.
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+  name: replace('${resourceName}st', '-', '')
+  location: location
+  kind: 'StorageV2'
+  sku: { name: 'Standard_LRS' }
+  properties: {
+    minimumTlsVersion: 'TLS1_2'
+    allowBlobPublicAccess: false
+  }
+}
+
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-01-01' = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource sourcesContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-01-01' = {
+  parent: blobService
+  name: 'sources'
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
 resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${resourceName}-web'
   location: location
@@ -161,3 +187,4 @@ output acrLoginServer string = acr.properties.loginServer
 output postgresFqdn string = postgres.properties.fullyQualifiedDomainName
 output containerAppIdentityId string = containerAppIdentity.id
 output webAppFqdn string = webApp.properties.configuration.ingress.fqdn
+output storageAccountName string = storageAccount.name

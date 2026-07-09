@@ -53,6 +53,12 @@ class SourceStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
+class ScanStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    CLEAN = "CLEAN"
+    INFECTED = "INFECTED"
+
+
 class DraftItemType(str, enum.Enum):
     EPIC = "EPIC"
     STORY = "STORY"
@@ -130,6 +136,9 @@ class Source(Base):
     kind: Mapped[SourceKind]
     status: Mapped[SourceStatus] = mapped_column(default=SourceStatus.QUEUED)
     storageKey: Mapped[str | None] = mapped_column(String, nullable=True)
+    sizeBytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mimeType: Mapped[str | None] = mapped_column(String, nullable=True)
+    scanStatus: Mapped[ScanStatus] = mapped_column(default=ScanStatus.PENDING)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

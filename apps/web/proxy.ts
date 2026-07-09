@@ -15,6 +15,6 @@ export const proxy = auth((req) => {
 });
 
 export const config = {
-  matcher: ['/workspaces/:path*'],
+  matcher: ['/workspaces/:path*', '/internal/:path*'],
   runtime: 'nodejs',
 };

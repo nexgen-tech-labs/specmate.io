@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { Eyebrow, Mono } from './demo-ui';
+import { Eyebrow } from './demo-ui';
 
 interface LandingHeroProps {
   playing: boolean;
@@ -17,7 +17,6 @@ export function LandingHero({ playing, onReset, onRunDemo }: LandingHeroProps) {
               S
             </div>
             <span className="text-lg font-bold tracking-tight">SpecMate</span>
-            <Mono className="ml-2 text-sm text-sub">demo · mocked data</Mono>
           </div>
           <div className="flex gap-3">
             <button

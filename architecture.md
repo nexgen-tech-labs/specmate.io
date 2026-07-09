@@ -132,11 +132,31 @@ Service: Jira, Azure DevOps, GitHub Issues — read (existing backlog reference 
 - Default model: `claude-opus-4-8`. Retries: SDK-level `max_retries=3` plus a 60s timeout, configured on the `AsyncAnthropic` client.
 - `POST /ai/demo-extract` (`apps/api/app/routers/ai_demo.py`) is a reference/demo route proving the pattern end-to-end — not a product route, superseded once Epic 2/3 add real extraction endpoints.
 
+### Per-customer AI cost tracking (`apps/web/src/lib/ai-cost.ts`)
+
+- `getWorkspaceCostForMonth(workspaceId, year, month)` — sums `AiCallLog` cost/tokens for a workspace within a calendar month via Prisma `aggregate()`.
+- `getTopWorkspacesByCost(limit, since?)` — cross-workspace `groupBy` ordered by cost descending, joined to `Workspace.name`/`planRevenueUsd`. Powers the internal dashboard's top-10 view.
+- `getCostToRevenueBreaches(thresholdRatio?)` — flags workspaces whose current-month AI cost / `Workspace.planRevenueUsd` exceeds a threshold (env `AI_COST_ALERT_THRESHOLD_RATIO`, default 0.5). Only considers workspaces with a non-null `planRevenueUsd`.
+- `Workspace.planRevenueUsd` is a manually-set nullable field — **not a real billing system**. No self-serve UI; set directly via DB access until a real subscription/billing model exists.
+- Internal dashboard: `apps/web/src/app/internal/ai-costs/page.tsx`, a Server Component gated by `isInternalAdmin()` (`apps/web/src/lib/admin-access.ts`) — an env-var email allowlist (`INTERNAL_ADMIN_EMAILS`), since there's no platform-staff role in the schema yet (the existing `Role` enum is workspace-scoped: ADMIN/REVIEWER/VIEWER). Unauthorized visitors get `notFound()`, matching the pattern used for workspace-role-gated pages.
+- **Alerting is visual-only in this pass.** Cost-to-revenue breaches are surfaced as a warning banner/badge on the dashboard itself — no email/Slack/PagerDuty integration exists yet. Wiring a real notification channel is future work once one is chosen.
+
+### File upload infrastructure (`apps/web/src/lib/blob-storage.ts`, `upload-validation.ts`)
+
+First issue of Epic 2 (Ingestion) — every later file-based parser (docx, PDF, Excel/CSV, transcripts) depends on a `Source` row with a populated `storageKey` pointing at a real stored file.
+
+- **Storage**: Azure Blob Storage (`@azure/storage-blob`), one blob per `Source` at key path `workspaceId/projectId/sourceId/<filename>`, in a `sources` container. `blob-storage.ts` exposes `uploadSourceFile()`, `getDownloadUrl()` (short-lived SAS URL — the container itself is not public), and `deleteSourceFile()`.
+- **Ownership**: `apps/web` owns the whole upload flow (`POST /api/workspaces/[workspaceId]/projects/[projectId]/sources`) — validates, uploads to blob, writes the `Source` row via Prisma. `apps/api`'s future parsing jobs consume the file independently via `storageKey`, so this doesn't couple the two services.
+- **Validation** (`upload-validation.ts`): a MIME-type allowlist mapped to `SourceKind` (docx/pdf/xlsx/csv/txt), a 25MB size cap (`MAX_UPLOAD_MB` env var), both enforced server-side regardless of the client-side pre-check in the upload UI.
+- **Virus scanning is a stub.** `scanFile()` always resolves `CLEAN` — there is no real antivirus integration yet (`Source.scanStatus`: PENDING → CLEAN today; INFECTED is modeled in the schema for when a real scanner, e.g. a ClamAV sidecar or an Azure-native scanning offering, is chosen and wired in).
+- **Local dev**: real Azure Storage isn't provisioned yet (see `infra/main.bicep` — Bicep is scaffolded but not deployed). Local/test dev uses the **Azurite** emulator (`docker run -p 10000:10000 mcr.microsoft.com/azure-storage/azurite`); see `infra/README.md`.
+- Upload UI: `apps/web/src/components/sources/upload-zone.tsx`, a client component using native HTML5 drag events and `XMLHttpRequest` (not `fetch`) for real upload-progress reporting. Rendered from `apps/web/src/app/workspaces/[workspaceId]/projects/[projectId]/sources/page.tsx`.
+
 ## 6. Deployment & Infrastructure
 
 Cloud Provider: Azure (using free credits)
 
-Key Services Used: Azure Container Apps (web + api), Azure Postgres Flexible Server, Azure Container Registry, Azure Key Vault, Log Analytics.
+Key Services Used: Azure Container Apps (web + api), Azure Postgres Flexible Server, Azure Container Registry, Azure Key Vault, Azure Blob Storage (uploaded Source files), Log Analytics.
 
 CI/CD Pipeline: GitHub Actions. `ci.yml` runs lint/typecheck/test on every PR. `deploy.yml` builds and pushes Docker images on merge to `main`, deploys to staging automatically, and deploys to production behind a manual approval gate (GitHub Environments). Auth to Azure uses OIDC federated credentials bound to a user-assigned Managed Identity — no long-lived client secret stored in GitHub.
 
@@ -165,8 +185,9 @@ Code Quality Tools: ESLint + Prettier + Husky/lint-staged (TypeScript side), Ruf
 - ~~Full data model implementation (Issue #3)~~ — done
 - ~~Auth/multi-tenancy implementation (Issue #2)~~ — done
 - ~~AI pipeline adapter implementation (Issue #4)~~ — done (`apps/api/app/services/ai/`); real extraction/structuring logic still belongs to Epic 2/3
-- Per-customer AI cost tracking (Issue #6) — `AiCallLog` table exists and is populated; aggregation dashboard, top-10-workspaces view, and cost/revenue alerting are still open
-- Source ingestion parsers and connectors (Epic 2, Issues #7–18)
+- ~~Per-customer AI cost tracking (Issue #6)~~ — done: query layer, top-10 dashboard, and visual cost/revenue breach warnings exist; real notification delivery (email/Slack/PagerDuty) and a real billing/subscription model are still open
+- ~~File upload infrastructure (Issue #7)~~ — done: drag-and-drop UI, type/size validation, Azure Blob Storage, `Source` row creation; virus scanning is a stub (always CLEAN) and the Storage Account isn't provisioned yet (Bicep scaffolded only)
+- Source ingestion parsers and connectors (Epic 2, Issues #8–18)
 - If job volume grows beyond what a Postgres job table comfortably handles, revisit introducing Azure Service Bus / Storage Queue.
 
 ## 10. Project Identification
