@@ -1,0 +1,277 @@
+// SpecMate core data model — every other epic builds on this schema.
+// Prisma is the source of truth for migrations; apps/api mirrors these tables
+// with hand-written SQLAlchemy models (apps/api/app/models.py) kept in sync manually.
+//
+// Soft-delete: soft-deletable models carry a nullable `deletedAt` — active rows have
+// `deletedAt = null`. ReviewDecision and AuditEvent are immutable logs (no deletedAt/updatedAt
+// at all); a correction is a new row, not an edit.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  REVIEWER
+  VIEWER
+}
+
+enum SourceKind {
+  DOCX
+  PDF
+  XLSX
+  CSV
+  TXT
+  TRANSCRIPT
+  CONFLUENCE
+  SLACK
+  JIRA_REF
+  ADO_REF
+  GITHUB_REF
+}
+
+enum SourceStatus {
+  QUEUED
+  PARSING
+  PARSED
+  FAILED
+}
+
+enum DraftItemType {
+  EPIC
+  STORY
+  TASK
+  SUBTASK
+  ACCEPTANCE_CRITERIA
+  TEST
+  RISK
+  NFR
+  DEPENDENCY
+  ASSUMPTION
+  QUESTION
+}
+
+enum ReviewDecisionType {
+  APPROVED
+  REJECTED
+  EDITED
+}
+
+enum PublishTarget {
+  JIRA
+  ADO
+  GITHUB
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+}
+
+model Workspace {
+  id        String    @id @default(cuid())
+  name      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  members     WorkspaceMember[]
+  projects    Project[]
+  auditEvents AuditEvent[]
+  invites     WorkspaceInvite[]
+  aiCallLogs  AiCallLog[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  memberships      WorkspaceMember[]
+  reviewDecisions  ReviewDecision[]
+  auditEvents      AuditEvent[]
+  sentInvites      WorkspaceInvite[]
+}
+
+model WorkspaceMember {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        Role
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  user      User      @relation(fields: [userId], references: [id])
+
+  @@unique([workspaceId, userId])
+}
+
+model Project {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id])
+  sources     Source[]
+  draftItems  DraftItem[]
+  aiCallLogs  AiCallLog[]
+}
+
+model Source {
+  id         String       @id @default(cuid())
+  projectId  String
+  name       String
+  kind       SourceKind
+  status     SourceStatus @default(QUEUED)
+  storageKey String?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  deletedAt  DateTime?
+
+  project          Project           @relation(fields: [projectId], references: [id])
+  rawRequirements  RawRequirement[]
+  traceLinks       TraceLink[]
+}
+
+model RawRequirement {
+  id          String    @id @default(cuid())
+  sourceId    String
+  text        String
+  sectionPath String
+  order       Int
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  source     Source      @relation(fields: [sourceId], references: [id])
+  traceLinks TraceLink[]
+}
+
+model DraftItem {
+  id           String        @id @default(cuid())
+  projectId    String
+  type         DraftItemType
+  title        String
+  description  String
+  payload      Json?
+  qualityScore Int?
+  parentId     String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  deletedAt    DateTime?
+
+  project         Project          @relation(fields: [projectId], references: [id])
+  parent          DraftItem?       @relation("DraftItemHierarchy", fields: [parentId], references: [id])
+  children        DraftItem[]      @relation("DraftItemHierarchy")
+  reviewDecisions ReviewDecision[]
+  publishedItems  PublishedItem[]
+  traceLinks      TraceLink[]
+}
+
+model ReviewDecision {
+  id           String              @id @default(cuid())
+  draftItemId  String
+  decision     ReviewDecisionType
+  actorUserId  String
+  notes        String?
+  createdAt    DateTime            @default(now())
+
+  draftItem DraftItem @relation(fields: [draftItemId], references: [id])
+  actor     User      @relation(fields: [actorUserId], references: [id])
+}
+
+model PublishedItem {
+  id          String        @id @default(cuid())
+  draftItemId String
+  targetTool  PublishTarget
+  externalKey String
+  externalUrl String
+  createdAt   DateTime      @default(now())
+  deletedAt   DateTime?
+
+  draftItem  DraftItem   @relation(fields: [draftItemId], references: [id])
+  traceLinks TraceLink[]
+}
+
+model AuditEvent {
+  id          String   @id @default(cuid())
+  workspaceId String
+  actorUserId String?
+  action      String
+  entityType  String
+  entityId    String
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  actor     User?     @relation(fields: [actorUserId], references: [id])
+}
+
+// Immutable log of every AI adapter call — no deletedAt/updatedAt, same convention
+// as ReviewDecision/AuditEvent. Populated by apps/api's app.services.ai; aggregated
+// by the (future) Issue #1.6 per-customer cost-tracking dashboard.
+model AiCallLog {
+  id                  String   @id @default(cuid())
+  workspaceId         String
+  projectId           String
+  task                String
+  model               String
+  promptVersion       String?
+  inputTokens         Int
+  outputTokens        Int
+  cacheReadTokens     Int
+  cacheCreationTokens Int
+  costUsd             Decimal  @db.Decimal(12, 6)
+  latencyMs           Int
+  createdAt           DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  project   Project   @relation(fields: [projectId], references: [id])
+}
+
+// Pending workspace invitation, resolved via a shareable token link (no email delivery yet).
+model WorkspaceInvite {
+  id              String       @id @default(cuid())
+  workspaceId     String
+  email           String
+  role            Role
+  token           String       @unique
+  status          InviteStatus @default(PENDING)
+  invitedByUserId String
+  expiresAt       DateTime
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  workspace  Workspace @relation(fields: [workspaceId], references: [id])
+  invitedBy  User      @relation(fields: [invitedByUserId], references: [id])
+}
+
+// Join record proving full traceability: Source -> RawRequirement -> DraftItem -> PublishedItem.
+// publishedItemId is nullable because a trace exists before a DraftItem is published.
+model TraceLink {
+  id               String   @id @default(cuid())
+  sourceId         String
+  rawRequirementId String
+  draftItemId      String
+  publishedItemId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  source         Source          @relation(fields: [sourceId], references: [id])
+  rawRequirement RawRequirement  @relation(fields: [rawRequirementId], references: [id])
+  draftItem      DraftItem       @relation(fields: [draftItemId], references: [id])
+  publishedItem  PublishedItem?  @relation(fields: [publishedItemId], references: [id])
+}

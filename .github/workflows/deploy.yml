@@ -1,0 +1,111 @@
+name: Deploy
+
+# Manual/gated: staging deploys automatically on merge to main; production requires
+# manual approval via the `production` GitHub Environment (configure required reviewers
+# in repo Settings > Environments).
+#
+# Auth uses OIDC federated credentials tied to an Azure Managed Identity — no client
+# secret is stored in GitHub. Configure the federated credential on the identity to trust
+# this repo + branch/environment (see infra/README.md).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  CONTAINERAPPS_ENV: ${{ vars.CONTAINERAPPS_ENVIRONMENT }}
+
+jobs:
+  build-and-push:
+    name: Build & push images
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      image-tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: tag
+        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login (OIDC federated credential)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Build & push web image
+        run: |
+          docker build -t "$ACR_NAME.azurecr.io/specmate-web:${{ steps.tag.outputs.tag }}" -f apps/web/Dockerfile .
+          docker push "$ACR_NAME.azurecr.io/specmate-web:${{ steps.tag.outputs.tag }}"
+
+      - name: Build & push api image
+        run: |
+          docker build -t "$ACR_NAME.azurecr.io/specmate-api:${{ steps.tag.outputs.tag }}" -f apps/api/Dockerfile apps/api
+          docker push "$ACR_NAME.azurecr.io/specmate-api:${{ steps.tag.outputs.tag }}"
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Azure login (OIDC federated credential)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy web to Container Apps (staging)
+        run: |
+          az containerapp update \
+            --name specmate-web-staging \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/specmate-web:${{ needs.build-and-push.outputs.image-tag }}"
+
+      - name: Deploy api to Container Apps (staging)
+        run: |
+          az containerapp update \
+            --name specmate-api-staging \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/specmate-api:${{ needs.build-and-push.outputs.image-tag }}"
+
+  deploy-production:
+    name: Deploy to production (manual approval gate)
+    needs: [build-and-push, deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Azure login (OIDC federated credential)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy web to Container Apps (production)
+        run: |
+          az containerapp update \
+            --name specmate-web \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/specmate-web:${{ needs.build-and-push.outputs.image-tag }}"
+
+      - name: Deploy api to Container Apps (production)
+        run: |
+          az containerapp update \
+            --name specmate-api \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_NAME.azurecr.io/specmate-api:${{ needs.build-and-push.outputs.image-tag }}"
