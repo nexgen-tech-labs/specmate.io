@@ -152,6 +152,88 @@ First issue of Epic 2 (Ingestion) — every later file-based parser (docx, PDF, 
 - **Local dev**: real Azure Storage isn't provisioned yet (see `infra/main.bicep` — Bicep is scaffolded but not deployed). Local/test dev uses the **Azurite** emulator (`docker run -p 10000:10000 mcr.microsoft.com/azure-storage/azurite`); see `infra/README.md`.
 - Upload UI: `apps/web/src/components/sources/upload-zone.tsx`, a client component using native HTML5 drag events and `XMLHttpRequest` (not `fetch`) for real upload-progress reporting. Rendered from `apps/web/src/app/workspaces/[workspaceId]/projects/[projectId]/sources/page.tsx`.
 
+### Word document (.docx) parser (`apps/api/app/services/parsing/docx_parser.py`)
+
+First of the file-based parsers (Epic 2) — turns an uploaded `.docx` into `RawRequirement` rows (`{sourceId, sectionPath, order, text}`).
+
+- **Library**: `python-docx` — chosen over `mammoth` for direct structural access (paragraph styles, `document.tables`) needed to build accurate section pointers and preserve table structure, rather than mammoth's HTML-rendering-oriented conversion.
+- **Algorithm**: walks `document.element.body.iterchildren()` in true document order (paragraphs and tables are sibling XML elements, not separate collections) so tables are emitted in their actual position. Maintains a heading stack (`Heading 1`/`Heading 2`/... paragraph styles, `Title` counted as level 1) to build a `sectionPath` like `"1. Overview/1.1 Scope"`; falls back to `"p.N"` when there's no heading context yet. Tables are converted to `" | "`-joined row text rather than dropped. Header/footer paragraph text is extracted too, tagged `#header`/`#footer`, but not treated as primary requirement content.
+- **Failure handling**: corrupt files, non-docx content, or documents with no extractable text/tables/headers/footers all raise a typed `DocxParseError` with a human-readable message — parsing never silently returns an empty result.
+- **Trigger — synchronous, not a job queue.** `POST /sources/{source_id}/parse` (`apps/api/app/routers/sources.py`) is called by `apps/web`'s upload route right after a successful upload (fire-and-forget from the upload response's perspective — a failed trigger call doesn't fail the upload; `Source.status` reflects the real parse outcome). apps/api fetches the file from Blob Storage via `storageKey` (`apps/api/app/services/storage/blob_client.py`, the read-side counterpart to `apps/web`'s `blob-storage.ts`), parses inline, and updates `Source.status` (QUEUED → PARSING → PARSED/FAILED). **This is a deliberate placeholder for the "Postgres job table" pattern described in the Dev commands section below** — no worker/poller exists anywhere in the repo yet; introducing one is follow-up work once parse volume or latency requirements demand async processing, not part of this issue's scope.
+- The `ParsedChunk` output type (`{text, section_path, order}`) lives in `apps/api/app/services/parsing/types.py`, shared by every parser rather than owned by docx specifically.
+- **Known pre-existing gap fixed alongside this issue**: `apps/api/app/models.py`'s enum-typed columns (`Role`, `SourceKind`, `SourceStatus`, `ScanStatus`, `DraftItemType`, `ReviewDecisionType`, `PublishTarget`) now explicitly declare `Enum(..., name="<PascalCaseName>", create_type=False)` to match the Postgres enum type names Prisma actually created (e.g. `"SourceKind"`) — SQLAlchemy's default lowercase-name inference (`sourcekind`) doesn't match, which nothing caught until this issue's tests were the first to insert a `Source`/`RawRequirement` row via SQLAlchemy instead of only reading.
+
+### PDF parser (`apps/api/app/services/parsing/pdf_parser.py`)
+
+Second file-based parser (Epic 2) — turns an uploaded PDF into `RawRequirement` rows, one chunk per page (PDF's natural structural unit — no heading hierarchy to recover the way docx has).
+
+- **Library**: `pypdf` — pure Python, MIT-licensed, no compiled binary, matching the license-clean bias `python-docx` set. `PyMuPDF`/`fitz` was considered (faster, more accurate, better image-detection) but rejected for its AGPL license. `pdfplumber` is a documented fallback if `pypdf`'s extraction quality proves too lossy in real usage — same `ParsedChunk` interface, a contained swap.
+- **Algorithm**: `PdfReader(io.BytesIO(file_bytes))`, iterate pages 1-indexed, `page.extract_text()` per page. Non-empty pages become one `ParsedChunk` each, `sectionPath = "p.N"` (the real page number, not a re-numbered index — a blank page in the middle doesn't shift later page numbers). Blank/whitespace-only pages are skipped without failing the whole document (handles partially-scanned PDFs).
+- **Scanned/image-only PDF detection**: if _every_ page has no extractable text, `PdfParseError` is raised with a distinct message ("...appears to be scanned/image-only... text extraction unavailable, OCR not yet supported") rather than silently returning an empty result — this is the acceptance-criterion requirement. A genuinely corrupt/unreadable PDF raises the same error type with a different message, so the two failure modes remain distinguishable in the error string even though both funnel into the same `Source.status = FAILED` + HTTP 422 handling in the router.
+- OCR is explicitly out of scope (stretch item per the issue) — a scanned PDF is flagged, not processed.
+- Wired into `_PARSERS[SourceKind.PDF]` in `sources.py`, same dispatch pattern the docx parser established — a third/fourth parser (Excel/CSV, transcripts) is expected to add one dict entry each, no router restructuring needed.
+- Test fixtures use `reportlab` (dev-only dependency, never in the production image) to generate real multi-page PDFs with actual text content in-memory — mirrors how `python-docx` itself builds the docx test fixtures, since no read-oriented PDF library can also write PDFs.
+
+### Excel/CSV parser (`apps/api/app/services/parsing/spreadsheet_parser.py`)
+
+Row-level extraction for backlog/tracker exports, one `RawRequirement` per non-empty data row.
+
+- **Library**: `openpyxl` (MIT, pure Python) for `.xlsx` — read _and_ write, so tests build real fixtures with the same library; stdlib `csv` for `.csv` (utf-8-sig decode with latin-1 fallback for legacy exports).
+- **Pointers use real spreadsheet row numbers** (1-indexed, header row counted): xlsx → `"{sheet}/r.{N}"`, CSV → `"r.{N}"`. Skipped empty rows don't renumber later rows.
+- **Header handling**: first row of each sheet/file is assumed to be headers (`has_header=True` — a function parameter, no per-upload override UI yet); data rows render as `"Header: value | Header: value"` pairs so column semantics survive into the extracted text. Cells beyond the header width keep their value un-labelled.
+- **Messy-export tolerance**: merged cells (value in anchor cell only), inconsistent column counts, and empty rows all degrade gracefully — never a crash. Corrupt files or workbooks with zero extractable rows raise `SpreadsheetParseError`.
+
+### Plain text / transcript parser (`apps/api/app/services/parsing/text_parser.py`)
+
+Stdlib-only. Two auto-detected modes:
+
+- **Transcript mode** — when ≥3 non-blank lines _and_ ≥25% of them start with a timestamp (`[00:31:12]`, `(31:12)`, `00:31:12 —`, `MM:SS`-style), chunks are the text between timestamps; each chunk's pointer is its nearest preceding timestamp. Continuation lines without a timestamp fold into the preceding chunk (preserves multi-line speaker turns).
+- **Paragraph mode** (fallback) — blank-line-separated paragraphs with `p.N` pointers, matching the docx parser's no-heading fallback convention. The threshold rule prevents prose that mentions a time once from being misdetected as a transcript.
+- Chunk boundaries are always logical (timestamp or paragraph break) — sentences are never split mid-way. Wired for both `SourceKind.TXT` and `SourceKind.TRANSCRIPT` (the latter isn't reachable via upload MIME detection yet; it exists for future connector-sourced transcripts).
+
+### Connectors (`apps/api/app/services/connectors/`, Issues #12-16)
+
+Two connector families share `apps/api/app/routers/connectors.py`, and all remote fetchers are injected via the overridable `get_connector_fetchers` dependency (tests fake the network boundary, same pattern as the blob downloader):
+
+- **Backlog reference sync (Jira / ADO / GitHub)** — `POST /connectors/{jira|ado|github}/reference-items/sync` with `{project_id, remote}` (Jira project key / ADO project name / GitHub `owner/repo`). Fetchers normalize remote items into `ReferenceItemData` (Jira ADF descriptions flattened to text; ADO HTML stripped; GitHub PRs filtered out of the issues endpoint, labels become `itemType`) and the router **upserts `ReferenceItem` rows by `(projectId, tool, externalKey)`** — re-sync updates in place, never duplicates. These are read-only reference data for duplicate detection (Issue 3.5, which owns the actual semantic indexing — the stored text here is its prerequisite); they're rendered with a READ-ONLY badge in the source management UI.
+- **Content sync (Confluence page / Slack channel)** — `POST /connectors/confluence/pages/{id}/sync` and `POST /connectors/slack/channels/{id}/sync`. Content becomes a `Source` (kind CONFLUENCE/SLACK, no blob) **upserted by `(projectId, externalRef)`** with its `RawRequirement`s replaced on every sync — re-sync updates the same Source. Confluence storage-format HTML is walked with a stdlib `HTMLParser` tracking the h1-h6 hierarchy for `{pageTitle}/{heading}` pointers; Slack messages are filtered (bot messages, any-subtype system messages, and empty/reactions-only messages excluded) and chunked one-per-message with `#{channel}@{timestamp}` pointers and `{author}: {text}` bodies.
+- **Auth is single-tenant and ops-configured via env** (`ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN` shared by Jira+Confluence, `ADO_ORG_URL`/`ADO_PAT`, `GITHUB_TOKEN`, `SLACK_BOT_TOKEN`) — a per-workspace connection store, OAuth flows, and browse/pickers (Confluence spaces, Slack channels) are deferred; content is synced by ID. Teams (vs Slack) was not built for v1.
+
+### Ingestion pipeline (Issue #17)
+
+The parse flow shared by all file parsers (`_parse_one` in `apps/api/app/routers/sources.py`):
+
+- **Within-source dedup** (`app/services/parsing/dedupe.py`) — chunks identical after casefold+whitespace normalization are dropped (first occurrence kept, `order` renumbered) before persisting, so repeated boilerplate (headers/footers/disclaimers) doesn't become duplicate RawRequirements. Cross-source semantic dedup belongs to Issue 3.5.
+- **Failure recording** — a failed parse stores its human-readable message on `Source.parseError` (cleared on success), so the UI shows actionable errors, not just a transient HTTP response.
+- `GET /projects/{id}/ingestion-summary` — source count, per-status breakdown, fragment totals, per-source rows, last-updated; the source management UI's summary numbers come from the same tables.
+- `POST /projects/{id}/reparse` — re-runs the pipeline over every parseable file-backed Source in a project; per-source failures are reported in the response, not fatal to the batch.
+
+### Source management UI (Issue #18, `apps/web/.../projects/[projectId]/sources/page.tsx`)
+
+- Server component renders the persisted source list (name, kind, fragment count, live status badge) plus a summary bar (total sources / fragments extracted / last updated) and the read-only reference-item list.
+- FAILED sources show their stored `parseError` inline — actionable, not generic.
+- **Re-parse** goes through an auth-gated web API proxy (`POST .../sources/{id}/reparse` → `apps/api`'s parse endpoint) since `apps/api` has internal-only ingress in Azure — the browser never calls it directly.
+- **Delete is a soft-delete**: `deletedAt` stamped on the Source and its RawRequirements (rows preserved for trace/audit history), plus an `AuditEvent` (`source.deleted`) recording the actor.
+
+### AI generation engine (Epic 3, `apps/api/app/services/generation/`)
+
+- **Pipeline** (`pipeline.py`, `POST /projects/{id}/generate`): four AI passes through the provider-agnostic adapter — cluster fragments → epics → stories+tasks (hierarchy inferred here; orphans stay unparented rather than forced, Issue 3.7) → supporting items (AC/tests/risks/NFRs/dependencies/assumptions/questions, only where traceable) — then a scoring pass (0-100 sub-scores for completeness/clarity/testability/specificity + human rationale, Issue 3.4). Gap detection (Issue 3.6): low completeness/specificity plus a model-produced _specific answerable question_ sets `flags.gap`. **Idempotency**: a `GenerationRun` row keyed on (projectId, sha256 of fragment texts) — re-running unchanged content reuses the run.
+- **Schemas** (`schemas.py`, Issue 3.2): canonical JSON Schemas enforced via structured output on every call; `packages/types/src/draft-items.ts` hand-mirrors the shapes for rendering. Structured-output constraints discovered live: no `additionalProperties: true`, no type unions with enums, no integer `minimum`/`maximum` — optionality is expressed by omission/empty string.
+- **Traceability** (Issue 3.3): passes cite fragment ids; persisted as `TraceLink` rows. Uncited items get `flags.noTrace` — flagged anomalies, never silent.
+- **Duplicate detection** (`similarity.py`, Issue 3.5): pure-Python TF-cosine over title+description against `ReferenceItem`s (Anthropic has no embeddings API; a separate embedding provider is a deliberate non-dependency for now — documented upgrade path). Threshold: `Workspace.duplicateThreshold`, falling back to `DUPLICATE_SIMILARITY_THRESHOLD` (0.55).
+- **Regeneration** (Issue 3.9, `POST /draft-items/{id}/regenerate`): reviewer context folded into a revision — new row with `revisionOfId`, original preserved (soft-deleted out of the queue), TraceLinks carried over. Approved items are locked (409).
+- **Stats** (Issue 3.10, `GET /projects/{id}/generation-summary`): run stats + live recomputed counts incl. source coverage (fragments cited by ≥1 item).
+
+### Human review workflow (Epic 4, `apps/web/src/lib/review.ts` + `/review` UI)
+
+- **Decisions** (Issue 4.4): approve / reject (reason required) / edit / reopen via `applyDecision` — every decision writes an attributed `ReviewDecision` + `AuditEvent`; nothing anonymous. Approve locks regeneration.
+- **Diff tracking** (Issue 4.3): `DraftItem.originalDraft` is the immutable AI draft; `editHistory` accumulates structured field-level diffs (sequence, not first-vs-last). Review UI has a "show AI draft" toggle.
+- **Duplicate resolution** (Issue 4.5): side-by-side generated vs. matched reference item; confirm (reject linked to the existing key) / merge (rejects + `duplicate.merged` audit carrying the content — external write-back belongs to Epics 5-7) / override (clears the flag with a distinct `duplicate.overridden` audit action, queryable for false-positive monitoring).
+- **Gap resolution** (Issue 4.6): answer-and-regenerate (through the web proxy to apps/api, `gap.regenerated` audit) or manual resolve (`gap.resolved_manually`). Gap-flagged items **cannot be approved** until resolved (server-side 409).
+- **Approval gates** (Issue 4.7, scoped): `Workspace.approvalStages` 1 (default) or 2 — stage 2 is an ADMIN sign-off (`signedOffByUserId`), enforced server-side (`isPublishable`); premature/wrong-role sign-off rejected at the API. Fully configurable named stages are deferred.
+- **Activity feed** (Issue 4.8): server-rendered straight from `AuditEvent` (can't drift from the audit trail), client polls `router.refresh()` every 5s; actor/action filters.
+- **Bulk ops** (Issue 4.9): bulk approve/reject loop the same `applyDecision` path — identical per-item audit granularity; confirm dialog in the UI.
+
 ## 6. Deployment & Infrastructure
 
 Cloud Provider: Azure (using free credits)
@@ -187,8 +269,16 @@ Code Quality Tools: ESLint + Prettier + Husky/lint-staged (TypeScript side), Ruf
 - ~~AI pipeline adapter implementation (Issue #4)~~ — done (`apps/api/app/services/ai/`); real extraction/structuring logic still belongs to Epic 2/3
 - ~~Per-customer AI cost tracking (Issue #6)~~ — done: query layer, top-10 dashboard, and visual cost/revenue breach warnings exist; real notification delivery (email/Slack/PagerDuty) and a real billing/subscription model are still open
 - ~~File upload infrastructure (Issue #7)~~ — done: drag-and-drop UI, type/size validation, Azure Blob Storage, `Source` row creation; virus scanning is a stub (always CLEAN) and the Storage Account isn't provisioned yet (Bicep scaffolded only)
-- Source ingestion parsers and connectors (Epic 2, Issues #8–18)
-- If job volume grows beyond what a Postgres job table comfortably handles, revisit introducing Azure Service Bus / Storage Queue.
+- ~~Word document (.docx) parser (Issue #8)~~ — done: `python-docx`-based parsing into `RawRequirement` rows with nested `sectionPath`, table/header/footer extraction, typed `DocxParseError` on failure; triggered via a synchronous `POST /sources/{id}/parse` (placeholder for a real job-table/worker model — see below)
+- ~~PDF parser (Issue #9)~~ — done: `pypdf`-based per-page extraction with `p.N` page-number pointers, typed `PdfParseError` for corrupt files and scanned/image-only detection (no silent empty result); OCR fallback for scanned PDFs is explicitly out of scope (stretch item)
+- ~~Excel/CSV parser (Issue #10)~~ — done: `openpyxl` + stdlib `csv`, row-level extraction with real `{sheet}/r.{N}` pointers, header-pair rendering, messy-export tolerance
+- ~~Plain text / transcript parser (Issue #11)~~ — done: stdlib-only, timestamp-aware transcript chunking with paragraph-mode fallback
+- ~~Connectors (Issues #12–16)~~ — done at the sync-endpoint level: Confluence page + Slack channel content sync (Source upsert by `externalRef`), Jira/ADO/GitHub read-only backlog pull into `ReferenceItem` (upsert, no duplicates). Deferred: OAuth flows + per-workspace connection store (auth is env-var single-tenant), Confluence/Slack browse pickers, Teams support, semantic indexing (Issue 3.5)
+- ~~Raw requirement extraction pipeline (Issue #17)~~ — done: within-source dedup, `Source.parseError` recording, ingestion-summary + reparse-all endpoints
+- ~~AI generation engine (Epic 3, Issues #19-28)~~ — done: 4-pass pipeline, strict schemas, traceability, scoring+gaps, TF-cosine duplicate detection (embedding index deferred), regeneration revisions, stats; verified end-to-end with real Claude API calls
+- ~~Human review workflow (Epic 4, Issues #29-37)~~ — done: review queue UI, decisions with audit, diff tracking, duplicate/gap resolution flows, 2-stage approval gates (named-stage config deferred), polling activity feed, bulk ops
+- ~~Source management UI (Issue #18)~~ — done: persisted source list with status badges + actionable errors, re-parse via web proxy, soft-delete with audit trail, read-only reference-item list, summary bar
+- If job volume grows beyond what a synchronous per-request parse comfortably handles, revisit introducing a real Postgres job table + worker (or Azure Service Bus / Storage Queue) — nothing like that exists yet as of Issue #9.
 
 ## 10. Project Identification
 

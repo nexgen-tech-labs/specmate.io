@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 interface Source {
   id: string;
@@ -47,6 +48,7 @@ function uploadWithProgress(
 }
 
 export function UploadZone({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
+  const router = useRouter();
   const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -82,12 +84,13 @@ export function UploadZone({ workspaceId, projectId }: { workspaceId: string; pr
         }
         setUploaded((prev) => [body.source as Source, ...prev]);
         setProgress(null);
+        router.refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Upload failed.');
         setProgress(null);
       }
     },
-    [workspaceId, projectId],
+    [workspaceId, projectId, router],
   );
 
   return (

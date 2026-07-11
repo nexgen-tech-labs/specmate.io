@@ -4,6 +4,21 @@ import { requireWorkspaceRole } from '@/lib/workspace-context';
 import { uploadSourceFile } from '@/lib/blob-storage';
 import { scanFile, validateUpload } from '@/lib/upload-validation';
 
+// Kinds apps/api has a parser for (Issues #8-11: docx, PDF, xlsx/csv, txt/transcripts).
+const PARSEABLE_KINDS = new Set(['DOCX', 'PDF', 'XLSX', 'CSV', 'TXT', 'TRANSCRIPT']);
+
+// Fire-and-forget from the caller's perspective: upload succeeding and parse succeeding
+// are separate concerns. Source.status already reflects parse outcome (QUEUED/PARSING/
+// PARSED/FAILED) for the UI to read later, so a failed trigger here doesn't fail the
+// upload response — it just leaves the Source at QUEUED for a manual/later retry.
+async function triggerParse(sourceId: string): Promise<void> {
+  try {
+    await fetch(`${process.env.API_BASE_URL}/sources/${sourceId}/parse`, { method: 'POST' });
+  } catch {
+    // Swallowed intentionally — see comment above.
+  }
+}
+
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ workspaceId: string; projectId: string }> },
@@ -81,6 +96,10 @@ export async function POST(
       where: { id: source.id },
       data: { storageKey, sizeBytes: file.size, mimeType: file.type, scanStatus },
     });
+
+    if (PARSEABLE_KINDS.has(updated.kind)) {
+      await triggerParse(updated.id);
+    }
 
     return NextResponse.json({ source: updated }, { status: 201 });
   } catch (err) {

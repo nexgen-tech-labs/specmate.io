@@ -13,7 +13,7 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -59,6 +59,13 @@ class ScanStatus(str, enum.Enum):
     INFECTED = "INFECTED"
 
 
+class DraftItemStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    EDITED = "EDITED"
+
+
 class DraftItemType(str, enum.Enum):
     EPIC = "EPIC"
     STORY = "STORY"
@@ -90,6 +97,8 @@ class Workspace(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     name: Mapped[str] = mapped_column(String)
+    duplicateThreshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    approvalStages: Mapped[int] = mapped_column(Integer, default=1)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -111,7 +120,7 @@ class WorkspaceMember(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
     userId: Mapped[str] = mapped_column(ForeignKey("User.id"))
-    role: Mapped[Role]
+    role: Mapped[Role] = mapped_column(Enum(Role, name="Role", create_type=False))
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
@@ -133,12 +142,18 @@ class Source(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
     name: Mapped[str] = mapped_column(String)
-    kind: Mapped[SourceKind]
-    status: Mapped[SourceStatus] = mapped_column(default=SourceStatus.QUEUED)
+    kind: Mapped[SourceKind] = mapped_column(Enum(SourceKind, name="SourceKind", create_type=False))
+    status: Mapped[SourceStatus] = mapped_column(
+        Enum(SourceStatus, name="SourceStatus", create_type=False), default=SourceStatus.QUEUED
+    )
     storageKey: Mapped[str | None] = mapped_column(String, nullable=True)
     sizeBytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     mimeType: Mapped[str | None] = mapped_column(String, nullable=True)
-    scanStatus: Mapped[ScanStatus] = mapped_column(default=ScanStatus.PENDING)
+    externalRef: Mapped[str | None] = mapped_column(String, nullable=True)
+    parseError: Mapped[str | None] = mapped_column(String, nullable=True)
+    scanStatus: Mapped[ScanStatus] = mapped_column(
+        Enum(ScanStatus, name="ScanStatus", create_type=False), default=ScanStatus.PENDING
+    )
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -162,12 +177,26 @@ class DraftItem(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
-    type: Mapped[DraftItemType]
+    type: Mapped[DraftItemType] = mapped_column(
+        Enum(DraftItemType, name="DraftItemType", create_type=False)
+    )
     title: Mapped[str] = mapped_column(String)
     description: Mapped[str] = mapped_column(Text)
     payload: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     qualityScore: Mapped[int | None] = mapped_column(Integer, nullable=True)
     parentId: Mapped[str | None] = mapped_column(ForeignKey("DraftItem.id"), nullable=True)
+    status: Mapped[DraftItemStatus] = mapped_column(
+        Enum(DraftItemStatus, name="DraftItemStatus", create_type=False),
+        default=DraftItemStatus.PENDING,
+    )
+    signedOffByUserId: Mapped[str | None] = mapped_column(String, nullable=True)
+    promptVersion: Mapped[str | None] = mapped_column(String, nullable=True)
+    generationRunId: Mapped[str | None] = mapped_column(String, nullable=True)
+    scoreDetail: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    flags: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    originalDraft: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    editHistory: Mapped[list[object] | None] = mapped_column(JSONB, nullable=True)
+    revisionOfId: Mapped[str | None] = mapped_column(String, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -181,7 +210,9 @@ class ReviewDecision(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     draftItemId: Mapped[str] = mapped_column(ForeignKey("DraftItem.id"))
-    decision: Mapped[ReviewDecisionType]
+    decision: Mapped[ReviewDecisionType] = mapped_column(
+        Enum(ReviewDecisionType, name="ReviewDecisionType", create_type=False)
+    )
     actorUserId: Mapped[str] = mapped_column(ForeignKey("User.id"))
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
@@ -192,7 +223,9 @@ class PublishedItem(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     draftItemId: Mapped[str] = mapped_column(ForeignKey("DraftItem.id"))
-    targetTool: Mapped[PublishTarget]
+    targetTool: Mapped[PublishTarget] = mapped_column(
+        Enum(PublishTarget, name="PublishTarget", create_type=False)
+    )
     externalKey: Mapped[str] = mapped_column(String)
     externalUrl: Mapped[str] = mapped_column(String)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
@@ -220,6 +253,45 @@ class TraceLink(Base):
     rawRequirementId: Mapped[str] = mapped_column(ForeignKey("RawRequirement.id"))
     draftItemId: Mapped[str] = mapped_column(ForeignKey("DraftItem.id"))
     publishedItemId: Mapped[str | None] = mapped_column(ForeignKey("PublishedItem.id"), nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
+
+
+class GenerationRun(Base):
+    """One AI generation run over a project's RawRequirements (Issue 3.1) — contentHash
+    provides idempotency, stats power the generation summary (Issue 3.10)."""
+
+    __tablename__ = "GenerationRun"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
+    contentHash: Mapped[str] = mapped_column(String)
+    promptVersion: Mapped[str] = mapped_column(String)
+    stats: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)
+    )
+
+
+class ReferenceItem(Base):
+    """Read-only snapshot of an existing Jira/ADO/GitHub backlog item (Issues #14-16),
+    pulled for duplicate-detection reference (Issue 3.5) — never edited or published.
+    Re-sync upserts by (projectId, tool, externalKey)."""
+
+    __tablename__ = "ReferenceItem"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
+    tool: Mapped[PublishTarget] = mapped_column(
+        Enum(PublishTarget, name="PublishTarget", create_type=False)
+    )
+    externalKey: Mapped[str] = mapped_column(String)
+    title: Mapped[str] = mapped_column(String)
+    description: Mapped[str] = mapped_column(Text)
+    itemType: Mapped[str] = mapped_column(String)
+    state: Mapped[str] = mapped_column(String)
+    url: Mapped[str | None] = mapped_column(String, nullable=True)
+    syncedAt: Mapped[datetime] = mapped_column(DateTime)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 

@@ -87,6 +87,10 @@ model Workspace {
   // compute an AI cost-to-revenue ratio (Issue #1.6). No real billing system yet —
   // set directly in the DB, no self-serve UI.
   planRevenueUsd Decimal?  @db.Decimal(10, 2)
+  // Duplicate-detection sensitivity (Issue 3.5), 0..1; null -> env default.
+  duplicateThreshold Float?
+  // 1 = single-reviewer approval (default); 2 = reviewer approval + ADMIN sign-off (Issue 4.7).
+  approvalStages Int @default(1)
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
@@ -134,10 +138,12 @@ model Project {
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
 
-  workspace   Workspace    @relation(fields: [workspaceId], references: [id])
-  sources     Source[]
-  draftItems  DraftItem[]
-  aiCallLogs  AiCallLog[]
+  workspace      Workspace       @relation(fields: [workspaceId], references: [id])
+  sources        Source[]
+  draftItems     DraftItem[]
+  aiCallLogs     AiCallLog[]
+  referenceItems ReferenceItem[]
+  generationRuns GenerationRun[]
 }
 
 model Source {
@@ -149,6 +155,12 @@ model Source {
   storageKey String?
   sizeBytes  Int?
   mimeType   String?
+  // External identity for connector-sourced content (Confluence page ID, Slack channel
+  // ID) — re-syncing upserts by (projectId, externalRef) instead of duplicating Sources.
+  externalRef String?
+  // Last parse failure message (human-readable, from the typed parser errors) — shown
+  // in the source management UI so failures are actionable. Cleared on successful parse.
+  parseError String?
   // Always PENDING -> CLEAN today (see apps/web/src/lib/upload-validation.ts#scanFile) — no real
   // AV integration exists yet. INFECTED is modeled now so the schema doesn't need a follow-up
   // migration once a real scanner is wired up.
@@ -160,6 +172,8 @@ model Source {
   project          Project           @relation(fields: [projectId], references: [id])
   rawRequirements  RawRequirement[]
   traceLinks       TraceLink[]
+
+  @@unique([projectId, externalRef])
 }
 
 model RawRequirement {
@@ -176,8 +190,15 @@ model RawRequirement {
   traceLinks TraceLink[]
 }
 
+enum DraftItemStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EDITED
+}
+
 model DraftItem {
-  id           String        @id @default(cuid())
+  id           String          @id @default(cuid())
   projectId    String
   type         DraftItemType
   title        String
@@ -185,6 +206,24 @@ model DraftItem {
   payload      Json?
   qualityScore Int?
   parentId     String?
+  // Review state (Epic 4). APPROVED locks further regeneration unless reopened.
+  status       DraftItemStatus @default(PENDING)
+  // Two-stage approval (Issue 4.7): set when an ADMIN signs off after approval.
+  // Only consulted when Workspace.approvalStages == 2.
+  signedOffByUserId String?
+  // Generation metadata (Epic 3)
+  promptVersion   String?
+  generationRunId String?
+  // {completeness, clarity, testability, specificity, rationale} — Issue 3.4
+  scoreDetail Json?
+  // {duplicate: {key, confidence, tool}, gap: {question}, noTrace: bool} — Issues 3.5/3.6/3.3
+  flags Json?
+  // Immutable first AI draft {title, description, payload} — never overwritten (Issue 4.3)
+  originalDraft Json?
+  // Sequence of field-level diffs [{at, actorUserId, field, before, after}] (Issue 4.3)
+  editHistory Json?
+  // Revision chain for regeneration (Issue 3.9): this item supersedes revisionOfId
+  revisionOfId String?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   deletedAt    DateTime?
@@ -277,6 +316,45 @@ model WorkspaceInvite {
 
 // Join record proving full traceability: Source -> RawRequirement -> DraftItem -> PublishedItem.
 // publishedItemId is nullable because a trace exists before a DraftItem is published.
+// One AI generation run over a project's RawRequirements (Issue 3.1). contentHash is
+// a sha256 of the ordered raw-requirement texts — re-running against unchanged content
+// reuses the run instead of duplicating items (idempotency), and stats power Issue 3.10.
+model GenerationRun {
+  id            String   @id @default(cuid())
+  projectId     String
+  contentHash   String
+  promptVersion String
+  stats         Json?
+  createdAt     DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, contentHash])
+}
+
+// Read-only snapshot of an existing backlog item pulled from Jira/ADO/GitHub (Issues
+// #14-16) — reference data for duplicate detection (Issue 3.5), never edited or
+// published by SpecMate. Re-sync upserts by (projectId, tool, externalKey). Reuses the
+// PublishTarget enum since ingest and publish target the same three tools.
+model ReferenceItem {
+  id          String        @id @default(cuid())
+  projectId   String
+  tool        PublishTarget
+  externalKey String
+  title       String
+  description String
+  itemType    String
+  state       String
+  url         String?
+  syncedAt    DateTime
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, tool, externalKey])
+}
+
 model TraceLink {
   id               String   @id @default(cuid())
   sourceId         String

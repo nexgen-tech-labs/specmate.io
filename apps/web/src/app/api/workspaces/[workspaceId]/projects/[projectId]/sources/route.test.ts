@@ -18,6 +18,9 @@ vi.mock('@/lib/blob-storage', () => ({
   uploadSourceFile: vi.fn(async () => ({ storageKey: 'mock/storage/key.txt' })),
 }));
 
+const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+vi.stubGlobal('fetch', fetchMock);
+
 const { POST, GET } = await import('./route');
 
 interface FakeFile {
@@ -177,6 +180,61 @@ describe('POST /api/workspaces/[workspaceId]/projects/[projectId]/sources', () =
     const source = await prisma.source.findUnique({ where: { id: body.source.id } });
     expect(source?.kind).toBe('PDF');
     expect(source?.status).toBe('QUEUED');
+  });
+
+  it('triggers a parse call to apps/api for a DOCX upload', async () => {
+    currentSession = { user: { id: admin.id } };
+    fetchMock.mockClear();
+    const res = await POST(
+      makeUploadRequest(
+        makeFile(
+          'reqs.docx',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          1234,
+        ),
+      ),
+      { params: params() },
+    );
+    expect(res.status).toBe(201);
+    const body: { source: { id: string } } = await res.json();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`/sources/${body.source.id}/parse`),
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('triggers a parse call for every parseable kind (CSV shown here)', async () => {
+    // As of Issue #10/#11 every uploadable kind (DOCX/PDF/XLSX/CSV/TXT) has a parser,
+    // so uploads of any accepted type fire the parse trigger.
+    currentSession = { user: { id: admin.id } };
+    fetchMock.mockClear();
+    const res = await POST(makeUploadRequest(makeFile('reqs.csv', 'text/csv', 100)), {
+      params: params(),
+    });
+    expect(res.status).toBe(201);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fail the upload response when the parse trigger call fails', async () => {
+    currentSession = { user: { id: admin.id } };
+    fetchMock.mockClear();
+    fetchMock.mockImplementationOnce(async () => {
+      throw new Error('network error');
+    });
+
+    const res = await POST(
+      makeUploadRequest(
+        makeFile(
+          'reqs2.docx',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          1234,
+        ),
+      ),
+      { params: params() },
+    );
+    expect(res.status).toBe(201);
   });
 });
 
