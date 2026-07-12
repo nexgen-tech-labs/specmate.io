@@ -4,6 +4,13 @@ import { hashPassword } from '../src/lib/password';
 const prisma = new PrismaClient();
 
 async function main() {
+  // Idempotent: re-running against an already-seeded database is a no-op, not a crash.
+  const existing = await prisma.user.findUnique({ where: { email: 'priya@acme.com' } });
+  if (existing) {
+    console.log('Database already seeded (priya@acme.com exists) — nothing to do.');
+    return;
+  }
+
   const workspace = await prisma.workspace.create({
     data: { name: 'Acme Corp' },
   });
