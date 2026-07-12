@@ -64,7 +64,19 @@ class ClaudeAdapter:
 
         text_blocks = [block.text for block in response.content if block.type == "text"]
         raw_text = "".join(text_blocks)
-        data = json.loads(raw_text)
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            hint = (
+                " Output hit the max_tokens ceiling and was truncated — raise the task's "
+                "max_tokens in TASK_MODELS."
+                if response.stop_reason == "max_tokens"
+                else ""
+            )
+            raise AIGenerationError(
+                f"Claude returned unparseable structured output for task={request.task!r} "
+                f"(stop_reason={response.stop_reason!r}).{hint}"
+            ) from exc
 
         usage = UsageInfo(
             input_tokens=response.usage.input_tokens,

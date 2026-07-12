@@ -22,7 +22,11 @@ class TaskModelConfig(BaseModel):
 
 TASK_MODELS: dict[str, TaskModelConfig] = {
     "extraction": TaskModelConfig(model=DEFAULT_MODEL, effort="low", max_tokens=4096),
-    "structuring": TaskModelConfig(model=DEFAULT_MODEL, effort="high", max_tokens=8192),
+    "clustering": TaskModelConfig(model=DEFAULT_MODEL, effort="medium", max_tokens=8192),
+    # Generation passes emit every epic/story/supporting item for a project in one
+    # structured response — size the budget for real document volumes, not demos.
+    "structuring": TaskModelConfig(model=DEFAULT_MODEL, effort="high", max_tokens=32000),
+    "scoring": TaskModelConfig(model=DEFAULT_MODEL, effort="medium", max_tokens=16384),
 }
 
 DEFAULT_TASK_MODEL = TaskModelConfig()
