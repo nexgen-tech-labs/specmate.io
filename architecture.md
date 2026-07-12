@@ -234,6 +234,15 @@ The parse flow shared by all file parsers (`_parse_one` in `apps/api/app/routers
 - **Activity feed** (Issue 4.8): server-rendered straight from `AuditEvent` (can't drift from the audit trail), client polls `router.refresh()` every 5s; actor/action filters.
 - **Bulk ops** (Issue 4.9): bulk approve/reject loop the same `applyDecision` path — identical per-item audit granularity; confirm dialog in the UI.
 
+### Jira publishing (Epic 5, `apps/api/app/services/connectors/jira_auth.py` + `jira_publish.py`)
+
+- **Connection abstraction** (Issues 5.1/5.8): call sites depend on the `JiraConnection` protocol, not a concrete auth. `CloudTokenConnection` (Atlassian email+API token, env-configured single-tenant) is the one connection object shared by the read-only backlog sync (Issue 2.8) and publishing. OAuth 2.0 3LO and a per-workspace encrypted connection store are deferred (needs an Atlassian app registration); Server/DC differences (REST v2, no ADF, PAT/Bearer, epic-link vs parent field) are documented in `jira_auth.py` for the future implementation. Health check: `GET /connectors/jira/health` (drives the UI's reconnect prompt).
+- **Discovery** (Issue 5.2): `GET /connectors/jira/projects` + per-project issue types/fields (required flagged) via the v3 createmeta endpoints — the customer's real configuration, cached as a snapshot on `PublishMapping.metadata` and refreshed whenever the mapping is saved.
+- **Mapping** (Issue 5.3): `PublishMapping` per (project, tool) — SpecMate type → Jira issue type map (defaults auto-suggested from discovery by name matching), plus `fieldDefaults` fixed values for required Jira fields SpecMate can't populate naturally. Admin UI at `/settings/publishing` with per-type dropdowns from the discovered set and required-field warnings.
+- **Publish** (Issues 5.4/5.6): `POST /projects/{id}/publish/jira {item_ids}` — per-item validation (approved + signed-off when two-stage, mapped type exists, required fields covered — fail-fast before any API call), hierarchy-ordered creation (epics → stories → tasks → subtasks), children linked via the modern unified `parent` field with keys minted earlier in the same batch; a child whose parent isn't published is **blocked with a clear message**, never orphaned. Re-publish of an already-published item is blocked, never duplicated.
+- **Write-back** (Issue 5.5): success creates a `PublishedItem` (key, permalink) and stamps `TraceLink.publishedItemId` — the trace is queryable both directions; the review UI shows a clickable `KEY ↗` chip.
+- **Errors/retry** (Issue 5.7): 429 (honoring Retry-After) and 5xx retried with backoff (4 attempts); 4xx surfaced immediately with Jira's own field errors; per-item failures persisted on `flags.publishError` (refresh-safe) and individually retriable; batch successes never rolled back by sibling failures.
+
 ## 6. Deployment & Infrastructure
 
 Cloud Provider: Azure (using free credits)
@@ -277,6 +286,7 @@ Code Quality Tools: ESLint + Prettier + Husky/lint-staged (TypeScript side), Ruf
 - ~~Raw requirement extraction pipeline (Issue #17)~~ — done: within-source dedup, `Source.parseError` recording, ingestion-summary + reparse-all endpoints
 - ~~AI generation engine (Epic 3, Issues #19-28)~~ — done: 4-pass pipeline, strict schemas, traceability, scoring+gaps, TF-cosine duplicate detection (embedding index deferred), regeneration revisions, stats; verified end-to-end with real Claude API calls
 - ~~Human review workflow (Epic 4, Issues #29-37)~~ — done: review queue UI, decisions with audit, diff tracking, duplicate/gap resolution flows, 2-stage approval gates (named-stage config deferred), polling activity feed, bulk ops
+- ~~Jira publishing (Epic 5, Issues #38-45)~~ — done: connection abstraction + health, real-config discovery, mapping UI with fixed defaults, hierarchy-aware idempotent publish with retry and per-item results, bidirectional trace write-back; OAuth 3LO + per-workspace connection store deferred (needs Atlassian app registration)
 - ~~Source management UI (Issue #18)~~ — done: persisted source list with status badges + actionable errors, re-parse via web proxy, soft-delete with audit trail, read-only reference-item list, summary bar
 - If job volume grows beyond what a synchronous per-request parse comfortably handles, revisit introducing a real Postgres job table + worker (or Azure Service Bus / Storage Queue) — nothing like that exists yet as of Issue #9.
 

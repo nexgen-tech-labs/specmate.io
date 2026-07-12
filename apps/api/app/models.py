@@ -257,6 +257,25 @@ class TraceLink(Base):
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
 
+class PublishMapping(Base):
+    """Per-project publish configuration for a target tool (Epic 5) — type map,
+    fixed defaults for required remote fields, and a cached discovery snapshot."""
+
+    __tablename__ = "PublishMapping"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
+    tool: Mapped[PublishTarget] = mapped_column(
+        Enum(PublishTarget, name="PublishTarget", create_type=False)
+    )
+    remoteProject: Mapped[str] = mapped_column(String)
+    typeMap: Mapped[dict[str, object]] = mapped_column(JSONB)
+    fieldDefaults: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    metadata_: Mapped[dict[str, object] | None] = mapped_column("metadata", JSONB, nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
+
+
 class GenerationRun(Base):
     """One AI generation run over a project's RawRequirements (Issue 3.1) — contentHash
     provides idempotency, stats power the generation summary (Issue 3.10)."""

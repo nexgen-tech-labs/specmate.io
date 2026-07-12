@@ -142,8 +142,9 @@ model Project {
   sources        Source[]
   draftItems     DraftItem[]
   aiCallLogs     AiCallLog[]
-  referenceItems ReferenceItem[]
-  generationRuns GenerationRun[]
+  referenceItems  ReferenceItem[]
+  generationRuns  GenerationRun[]
+  publishMappings PublishMapping[]
 }
 
 model Source {
@@ -330,6 +331,26 @@ model GenerationRun {
   project Project @relation(fields: [projectId], references: [id])
 
   @@unique([projectId, contentHash])
+}
+
+// Per-project publish configuration for a target tool (Epic 5: Jira first).
+// Stores the SpecMate->Jira type map, fixed defaults for required Jira fields with
+// no natural SpecMate value, and a refreshable snapshot of the discovered Jira
+// project metadata (issue types + fields) so publishing doesn't re-query Jira.
+model PublishMapping {
+  id             String        @id @default(cuid())
+  projectId      String
+  tool           PublishTarget
+  remoteProject  String // Jira project key
+  typeMap        Json // {EPIC: "Epic", STORY: "Story", ...}
+  fieldDefaults  Json? // {customfield_10020: "Backend", ...} fixed values for required fields
+  metadata       Json? // discovery snapshot {issueTypes: [...], fetchedAt}
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, tool])
 }
 
 // Read-only snapshot of an existing backlog item pulled from Jira/ADO/GitHub (Issues

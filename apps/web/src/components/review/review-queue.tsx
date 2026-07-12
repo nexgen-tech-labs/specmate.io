@@ -22,12 +22,15 @@ export interface ReviewItem {
     duplicate?: { key: string; tool: string; confidence: number };
     gap?: { question: string };
     noTrace?: boolean;
+    publishError?: string;
   } | null;
   parentId: string | null;
   signedOff: boolean;
   originalDraft: { title?: string; description?: string } | null;
   editHistory: Array<{ at: string; field: string; before: unknown; after: unknown }>;
   sources: Array<{ label: string; text: string }>;
+  publishedKey: string | null;
+  publishedUrl: string | null;
   duplicateReference: { title: string; description: string; state: string } | null;
 }
 
@@ -110,6 +113,35 @@ export function ReviewQueue({
     if (await call(`${base}/bulk`, { item_ids: ids, action, reason })) setSelected(new Set());
   }
 
+  async function publishSelected() {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    if (!window.confirm(`Publish ${ids.length} item(s) to Jira?`)) return;
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/workspaces/${workspaceId}/projects/${projectId}/publish/jira`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item_ids: ids }),
+    });
+    setBusy(false);
+    const payload = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      detail?: string;
+      succeeded?: number;
+      failed?: number;
+      results?: Array<{ ok: boolean; error?: string }>;
+    };
+    if (!res.ok) {
+      setError(payload.detail ?? payload.error ?? 'Publishing failed.');
+    } else if ((payload.failed ?? 0) > 0) {
+      const firstError = payload.results?.find((r) => !r.ok)?.error;
+      setError(`${payload.succeeded} published, ${payload.failed} failed — ${firstError ?? ''}`);
+    }
+    setSelected(new Set());
+    router.refresh();
+  }
+
   function toggle(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -173,6 +205,14 @@ export function ReviewQueue({
               className="rounded border border-line px-2 py-1 text-red"
             >
               Bulk reject
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void publishSelected()}
+              className="rounded border border-cobalt px-2 py-1 font-semibold text-cobalt"
+            >
+              Publish to Jira
             </button>
           </span>
         ) : null}
@@ -326,6 +366,12 @@ export function ReviewQueue({
                       ⚠ No traceable source recorded for this item.
                     </p>
                   )}
+
+                  {item.flags?.publishError ? (
+                    <p className="mt-3 text-xs text-red">
+                      Publish failed: {item.flags.publishError}
+                    </p>
+                  ) : null}
 
                   {item.flags?.duplicate && item.duplicateReference && canReview ? (
                     <div className="mt-3 rounded border border-line bg-paper p-3 text-xs">

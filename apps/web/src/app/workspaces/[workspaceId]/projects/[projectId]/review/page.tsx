@@ -31,6 +31,7 @@ export default async function ReviewPage({
       ...(filters.status ? { status: filters.status as never } : {}),
     },
     include: {
+      publishedItems: { where: { deletedAt: null }, take: 1 },
       traceLinks: {
         include: {
           rawRequirement: { select: { text: true, sectionPath: true } },
@@ -73,6 +74,8 @@ export default async function ReviewPage({
     signedOff: item.signedOffByUserId !== null,
     originalDraft: item.originalDraft as ReviewItem['originalDraft'],
     editHistory: (item.editHistory as ReviewItem['editHistory']) ?? [],
+    publishedKey: item.publishedItems[0]?.externalKey ?? null,
+    publishedUrl: item.publishedItems[0]?.externalUrl ?? null,
     sources: item.traceLinks.map((t) => ({
       label: `${t.source.name} · ${t.rawRequirement.sectionPath}`,
       text: t.rawRequirement.text,
