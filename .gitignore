@@ -53,3 +53,6 @@ coverage/
 
 # Azure / IaC local artifacts
 infra/*.bicepparam.local.json
+
+# Personal editor workspace (machine-specific paths)
+*.code-workspace
