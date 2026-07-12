@@ -50,6 +50,17 @@ uv run uvicorn app.main:app --reload
 
 Visit http://localhost:8000/health — should return `{"status": "ok"}`.
 
+### One-command start/stop
+
+Once both `.env` files exist, the whole stack (Postgres, Azurite, api, web) starts
+and stops with:
+
+```bash
+./scripts/start-dev.sh          # logs land in .logs/
+./scripts/stop-dev.sh           # stops both dev servers, keeps docker containers
+./scripts/stop-dev.sh --all     # also stops Postgres + Azurite
+```
+
 ## Running tests
 
 ```bash

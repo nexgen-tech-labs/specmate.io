@@ -56,3 +56,6 @@ infra/*.bicepparam.local.json
 
 # Personal editor workspace (machine-specific paths)
 *.code-workspace
+
+# Dev-stack logs from scripts/start-dev.sh
+.logs/
