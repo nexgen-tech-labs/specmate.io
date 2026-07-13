@@ -89,7 +89,17 @@ export async function applyDecision(itemId: string, input: DecisionInput): Promi
         prisma.reviewDecision.create({
           data: { draftItemId: itemId, decision: 'APPROVED', actorUserId: input.actorUserId },
         }),
-        auditRow(input, itemId, 'draft_item.approved', {}),
+        auditRow(
+          input,
+          itemId,
+          'draft_item.approved',
+          {},
+          {
+            projectId: item.projectId,
+            before: { status: item.status },
+            after: { status: 'APPROVED' },
+          },
+        ),
       ]);
       return { ok: true, status: 200 };
     }
@@ -108,7 +118,17 @@ export async function applyDecision(itemId: string, input: DecisionInput): Promi
             notes: input.reason,
           },
         }),
-        auditRow(input, itemId, 'draft_item.rejected', { reason: input.reason }),
+        auditRow(
+          input,
+          itemId,
+          'draft_item.rejected',
+          { reason: input.reason },
+          {
+            projectId: item.projectId,
+            before: { status: item.status },
+            after: { status: 'REJECTED' },
+          },
+        ),
       ]);
       return { ok: true, status: 200 };
     }
@@ -133,7 +153,20 @@ export async function applyDecision(itemId: string, input: DecisionInput): Promi
         prisma.reviewDecision.create({
           data: { draftItemId: itemId, decision: 'EDITED', actorUserId: input.actorUserId },
         }),
-        auditRow(input, itemId, 'draft_item.edited', { fields: diffs.map((d) => d.field) }),
+        auditRow(
+          input,
+          itemId,
+          'draft_item.edited',
+          { fields: diffs.map((d) => d.field) },
+          {
+            projectId: item.projectId,
+            before: { title: item.title, description: item.description },
+            after: {
+              title: input.edits.title ?? item.title,
+              description: input.edits.description ?? item.description,
+            },
+          },
+        ),
       ]);
       return { ok: true, status: 200 };
     }
@@ -154,7 +187,16 @@ export async function applyDecision(itemId: string, input: DecisionInput): Promi
           where: { id: itemId },
           data: { signedOffByUserId: input.actorUserId },
         }),
-        auditRow(input, itemId, 'draft_item.signed_off', {}),
+        auditRow(
+          input,
+          itemId,
+          'draft_item.signed_off',
+          {},
+          {
+            projectId: item.projectId,
+            after: { signedOffByUserId: input.actorUserId },
+          },
+        ),
       ]);
       return { ok: true, status: 200 };
     }
@@ -165,7 +207,17 @@ export async function applyDecision(itemId: string, input: DecisionInput): Promi
           where: { id: itemId },
           data: { status: 'PENDING', signedOffByUserId: null },
         }),
-        auditRow(input, itemId, 'draft_item.reopened', {}),
+        auditRow(
+          input,
+          itemId,
+          'draft_item.reopened',
+          {},
+          {
+            projectId: item.projectId,
+            before: { status: item.status, signedOffByUserId: item.signedOffByUserId },
+            after: { status: 'PENDING', signedOffByUserId: null },
+          },
+        ),
       ]);
       return { ok: true, status: 200 };
     }
@@ -177,14 +229,23 @@ function auditRow(
   itemId: string,
   action: string,
   metadata: Record<string, unknown>,
+  states?: {
+    projectId?: string;
+    before?: Record<string, unknown>;
+    after?: Record<string, unknown>;
+  },
 ) {
   return prisma.auditEvent.create({
     data: {
       workspaceId: input.workspaceId,
+      projectId: states?.projectId,
       actorUserId: input.actorUserId,
+      actorType: 'USER',
       action,
       entityType: 'DraftItem',
       entityId: itemId,
+      beforeState: (states?.before ?? undefined) as Prisma.InputJsonValue | undefined,
+      afterState: (states?.after ?? undefined) as Prisma.InputJsonValue | undefined,
       metadata: metadata as Prisma.InputJsonValue,
     },
   });

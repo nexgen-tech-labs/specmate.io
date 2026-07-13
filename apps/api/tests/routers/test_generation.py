@@ -27,6 +27,7 @@ from app.models import (
 )
 from app.routers.generation import get_generation_adapter
 from app.services.ai.adapter import GenerationRequest, GenerationResult, UsageInfo
+from tests.audit_cleanup import purge_audit_events
 
 
 def _now() -> datetime:
@@ -214,6 +215,7 @@ async def _cleanup(ids: dict[str, object]) -> None:
             )
             await session.execute(delete(Source).where(Source.id == str(ids["source_id"])))
             await session.execute(delete(Project).where(Project.id == project_id))
+            await purge_audit_events(session, str(ids["workspace_id"]))
             await session.execute(delete(Workspace).where(Workspace.id == str(ids["workspace_id"])))
             await session.commit()
     finally:
@@ -430,6 +432,7 @@ def test_generate_with_no_fragments_returns_422() -> None:
         try:
             async with AsyncSession(engine) as session:
                 await session.execute(delete(Project).where(Project.id == ids["project_id"]))
+                await purge_audit_events(session, ids["workspace_id"])
                 await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
                 await session.commit()
         finally:

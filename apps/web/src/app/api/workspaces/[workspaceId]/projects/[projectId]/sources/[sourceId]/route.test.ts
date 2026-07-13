@@ -50,7 +50,12 @@ describe('source delete + reparse routes', () => {
   });
 
   afterAll(async () => {
-    await prisma.auditEvent.deleteMany({ where: { workspaceId: workspace.id } });
+    // AuditEvent is trigger-protected (append-only); test cleanup uses the
+    // maintenance GUC inside one transaction (same pattern as review.test.ts).
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(`SET LOCAL specmate.maintenance = 'on'`),
+      prisma.auditEvent.deleteMany({ where: { workspaceId: workspace.id } }),
+    ]);
     await prisma.rawRequirement.deleteMany({ where: { sourceId: source.id } });
     await prisma.source.deleteMany({ where: { projectId: project.id } });
     await prisma.workspaceMember.deleteMany({ where: { workspaceId: workspace.id } });

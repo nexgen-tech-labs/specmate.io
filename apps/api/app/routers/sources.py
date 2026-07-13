@@ -15,7 +15,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
-from app.models import RawRequirement, Source, SourceKind, SourceStatus
+from app.models import Project, RawRequirement, Source, SourceKind, SourceStatus
+from app.services.audit import record_audit_event
 from app.services.parsing.dedupe import dedupe_chunks
 from app.services.parsing.docx_parser import DocxParseError, parse_docx
 from app.services.parsing.pdf_parser import PdfParseError, parse_pdf
@@ -93,6 +94,9 @@ async def _parse_one(
     source.updatedAt = _now()
     await session.commit()
 
+    project = await session.get(Project, source.projectId)
+    assert project is not None
+
     try:
         file_bytes = await blob_downloader(source.storageKey)
         chunks = dedupe_chunks(parser(file_bytes))
@@ -100,6 +104,17 @@ async def _parse_one(
         source.status = SourceStatus.FAILED
         source.parseError = str(exc)
         source.updatedAt = _now()
+        # Ingest failure is auditable too (Issue 8.1) — same transaction as the
+        # status change it describes.
+        record_audit_event(
+            session,
+            workspace_id=project.workspaceId,
+            project_id=project.id,
+            action="source.parse_failed",
+            entity_type="Source",
+            entity_id=source.id,
+            after={"status": SourceStatus.FAILED.value, "error": str(exc)},
+        )
         await session.commit()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -107,6 +122,15 @@ async def _parse_one(
     source.status = SourceStatus.PARSED
     source.parseError = None
     source.updatedAt = _now()
+    record_audit_event(
+        session,
+        workspace_id=project.workspaceId,
+        project_id=project.id,
+        action="source.parsed",
+        entity_type="Source",
+        entity_id=source.id,
+        after={"status": SourceStatus.PARSED.value, "chunk_count": len(chunks)},
+    )
     await session.commit()
     return len(chunks)
 

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.models import (
+    AuditActorType,
     DraftItem,
     DraftItemStatus,
     GenerationRun,
@@ -21,6 +22,7 @@ from app.models import (
     RawRequirement,
     TraceLink,
 )
+from app.services.audit import record_audit_event
 from app.services.ai.adapter import AIAdapter, GenerationRequest, Message
 from app.services.ai.claude_adapter import ClaudeAdapter
 from app.services.ai.logging_adapter import LoggingAdapter
@@ -177,6 +179,18 @@ async def regenerate_item(
     # Previous revision leaves the active queue but is preserved (revision history).
     item.deletedAt = now
     item.updatedAt = now
+    record_audit_event(
+        session,
+        workspace_id=body.workspace_id,
+        project_id=item.projectId,
+        action="draft_item.regenerated",
+        entity_type="DraftItem",
+        entity_id=new_item.id,
+        actor_type=AuditActorType.AI,
+        before={"item_id": item.id, "title": item.title, "description": item.description},
+        after={"title": new_item.title, "description": new_item.description},
+        metadata={"reviewer_context": body.context},
+    )
     await session.commit()
     return RegenerateResponse(new_item_id=new_item.id, previous_item_id=item.id)
 

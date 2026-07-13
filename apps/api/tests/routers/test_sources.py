@@ -26,6 +26,7 @@ from app.models import Project, RawRequirement, Source, Workspace
 from app.routers.sources import get_blob_downloader
 from app.services.parsing.docx_parser import DocxParseError
 from app.services.storage.blob_client import BlobDownloadError
+from tests.audit_cleanup import purge_audit_events
 
 
 def _now() -> datetime:
@@ -129,6 +130,7 @@ async def _cleanup(ids: dict[str, str]) -> None:
             )
             await session.execute(delete(Source).where(Source.id == ids["source_id"]))
             await session.execute(delete(Project).where(Project.id == ids["project_id"]))
+            await purge_audit_events(session, ids["workspace_id"])
             await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
             await session.commit()
     finally:

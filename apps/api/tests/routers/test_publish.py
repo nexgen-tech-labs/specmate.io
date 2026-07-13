@@ -24,6 +24,7 @@ from app.models import (
 from app.routers.publish import PublishGateway, get_publish_gateway
 from app.services.connectors.jira_auth import CloudTokenConnection
 from app.services.connectors.jira_publish import PublishCandidate, PublishOutcome
+from tests.audit_cleanup import purge_audit_events
 
 _FAKE_META: dict[str, object] = {
     "project_key": "KAN",
@@ -189,6 +190,7 @@ async def _cleanup(ids: dict[str, str]) -> None:
                 delete(PublishMapping).where(PublishMapping.projectId == ids["project_id"])
             )
             await session.execute(delete(Project).where(Project.id == ids["project_id"]))
+            await purge_audit_events(session, ids["workspace_id"])
             await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
             await session.commit()
     finally:

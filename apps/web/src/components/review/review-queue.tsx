@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { TracePanel } from '@/components/review/trace-panel';
 
 export interface ReviewItem {
   id: string;
@@ -81,6 +82,7 @@ export function ReviewQueue({
   const [editDraft, setEditDraft] = useState<{ title: string; description: string } | null>(null);
   const [gapAnswer, setGapAnswer] = useState('');
   const [showDiff, setShowDiff] = useState(false);
+  const [traceItemId, setTraceItemId] = useState<string | null>(null);
 
   async function call(url: string, body: unknown): Promise<boolean> {
     setBusy(true);
@@ -390,6 +392,17 @@ export function ReviewQueue({
                     <p className="mt-3 text-xs text-red">
                       Publish failed: {item.flags.publishError}
                     </p>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={() => setTraceItemId(traceItemId === item.id ? null : item.id)}
+                    className="mt-3 text-xs text-cobalt underline-offset-2 hover:underline"
+                  >
+                    {traceItemId === item.id ? 'Hide full trace' : 'View full trace'}
+                  </button>
+                  {traceItemId === item.id ? (
+                    <TracePanel workspaceId={workspaceId} itemId={item.id} />
                   ) : null}
 
                   {item.flags?.duplicate && item.duplicateReference && canReview ? (

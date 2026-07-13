@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.models import (
+    AuditActorType,
     DraftItem,
     DraftItemStatus,
     Project,
@@ -25,6 +26,7 @@ from app.models import (
     TraceLink,
     Workspace,
 )
+from app.services.audit import record_audit_event
 from app.services.connectors.jira_auth import (
     JiraConnection,
     check_connection_health,
@@ -189,6 +191,9 @@ async def get_mapping(
 
 class PublishBody(BaseModel):
     item_ids: list[str]
+    # Forwarded by the web proxy from the authenticated session (Issue 8.1 —
+    # publish audit events carry the human who triggered them).
+    actor_user_id: str | None = None
 
 
 class PublishItemResult(BaseModel):
@@ -388,6 +393,17 @@ async def publish_to_jira(
                     item_id=candidate.item_id, ok=True, key=outcome.key, url=outcome.url
                 )
             )
+            record_audit_event(
+                session,
+                workspace_id=workspace.id,
+                project_id=project_id,
+                action="draft_item.published",
+                entity_type="DraftItem",
+                entity_id=candidate.item_id,
+                actor_user_id=body.actor_user_id,
+                actor_type=AuditActorType.USER,
+                after={"tool": "JIRA", "key": outcome.key, "url": outcome.url},
+            )
         else:
             # Persisted so a page refresh doesn't lose failure visibility (Issue 5.7);
             # individually retriable by re-running publish for this item.
@@ -396,6 +412,17 @@ async def publish_to_jira(
             item.updatedAt = now
             results.append(
                 PublishItemResult(item_id=candidate.item_id, ok=False, error=outcome.error)
+            )
+            record_audit_event(
+                session,
+                workspace_id=workspace.id,
+                project_id=project_id,
+                action="draft_item.publish_failed",
+                entity_type="DraftItem",
+                entity_id=candidate.item_id,
+                actor_user_id=body.actor_user_id,
+                actor_type=AuditActorType.USER,
+                after={"tool": "JIRA", "error": outcome.error},
             )
         await session.commit()
 

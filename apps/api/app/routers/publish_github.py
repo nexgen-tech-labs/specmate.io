@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.models import (
+    AuditActorType,
     DraftItem,
     DraftItemStatus,
     Project,
@@ -25,6 +26,7 @@ from app.models import (
     TraceLink,
     Workspace,
 )
+from app.services.audit import record_audit_event
 from app.services.connectors.format_adapter import FormatMode
 from app.services.connectors.github_auth import (
     GitHubConnection,
@@ -187,6 +189,8 @@ async def get_github_mapping(
 
 class GitHubPublishBody(BaseModel):
     item_ids: list[str]
+    # Forwarded by the web proxy from the authenticated session (Issue 8.1).
+    actor_user_id: str | None = None
 
 
 class GitHubPublishItemResult(BaseModel):
@@ -368,10 +372,32 @@ async def publish_to_github(
                         await gateway.update_body(connection, mapping.remoteProject, parent_number, new_body)
                     except ConnectorError:
                         pass  # best-effort — the issue itself published fine; task list is cosmetic
+            record_audit_event(
+                session,
+                workspace_id=workspace.id,
+                project_id=project_id,
+                action="draft_item.published",
+                entity_type="DraftItem",
+                entity_id=candidate.item_id,
+                actor_user_id=body.actor_user_id,
+                actor_type=AuditActorType.USER,
+                after={"tool": "GITHUB", "key": outcome.key, "url": outcome.url},
+            )
         else:
             flags["publishError"] = outcome.error
             item.flags = flags
             results.append(GitHubPublishItemResult(item_id=candidate.item_id, ok=False, error=outcome.error))
+            record_audit_event(
+                session,
+                workspace_id=workspace.id,
+                project_id=project_id,
+                action="draft_item.publish_failed",
+                entity_type="DraftItem",
+                entity_id=candidate.item_id,
+                actor_user_id=body.actor_user_id,
+                actor_type=AuditActorType.USER,
+                after={"tool": "GITHUB", "error": outcome.error},
+            )
         item.updatedAt = now
         await session.commit()
 

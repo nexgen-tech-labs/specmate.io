@@ -17,6 +17,7 @@ from app.models import DraftItem, Project, PublishedItem, PublishMapping, TraceL
 from app.routers.publish_github import GitHubPublishGateway, get_github_gateway
 from app.services.connectors.github_auth import TokenConnection
 from app.services.connectors.github_publish import GitHubPublishCandidate, GitHubPublishOutcome
+from tests.audit_cleanup import purge_audit_events
 
 _FAKE_META: dict[str, object] = {
     "repo": "acme/payments",
@@ -136,6 +137,7 @@ async def _cleanup(ids: dict[str, str]) -> None:
                 await session.execute(delete(DraftItem).where(DraftItem.id.in_(item_ids)))
             await session.execute(delete(PublishMapping).where(PublishMapping.projectId == ids["project_id"]))
             await session.execute(delete(Project).where(Project.id == ids["project_id"]))
+            await purge_audit_events(session, ids["workspace_id"])
             await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
             await session.commit()
     finally:

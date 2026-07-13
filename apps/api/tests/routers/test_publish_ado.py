@@ -17,6 +17,7 @@ from app.models import DraftItem, Project, PublishedItem, PublishMapping, TraceL
 from app.routers.publish_ado import AdoPublishGateway, get_ado_gateway
 from app.services.connectors.ado_auth import PatConnection
 from app.services.connectors.ado_publish import AdoPublishCandidate, AdoPublishOutcome
+from tests.audit_cleanup import purge_audit_events
 
 _FAKE_META: dict[str, object] = {
     "project_name": "hitesh-specmate",
@@ -132,6 +133,7 @@ async def _cleanup(ids: dict[str, str]) -> None:
                 await session.execute(delete(DraftItem).where(DraftItem.id.in_(item_ids)))
             await session.execute(delete(PublishMapping).where(PublishMapping.projectId == ids["project_id"]))
             await session.execute(delete(Project).where(Project.id == ids["project_id"]))
+            await purge_audit_events(session, ids["workspace_id"])
             await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
             await session.commit()
     finally:

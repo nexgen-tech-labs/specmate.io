@@ -1693,6 +1693,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pypdf" },
     { name = "python-docx" },
+    { name = "reportlab" },
     { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1706,6 +1707,7 @@ dev = [
     { name = "reportlab" },
     { name = "ruff" },
     { name = "types-openpyxl" },
+    { name = "types-reportlab" },
 ]
 
 [package.metadata]
@@ -1721,6 +1723,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.7.0" },
     { name = "pypdf", specifier = ">=5.1.0" },
     { name = "python-docx", specifier = ">=1.1.2" },
+    { name = "reportlab", specifier = ">=4.2.5" },
     { name = "sqlalchemy", specifier = ">=2.0.36" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
@@ -1734,6 +1737,7 @@ dev = [
     { name = "reportlab", specifier = ">=4.2.5" },
     { name = "ruff", specifier = ">=0.8.4" },
     { name = "types-openpyxl", specifier = ">=3.1.5" },
+    { name = "types-reportlab", specifier = ">=4.5.1.20260712" },
 ]
 
 [[package]]
@@ -1797,6 +1801,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f5/d1/a1e23040a758746ad5bb6b8849a011c3c901775618bc7e1fec3a1a8b7142/types_openpyxl-3.1.5.20260518.tar.gz", hash = "sha256:da9cd644e4e80215a3f60a8c2c2c8e980e941a9b581cffa3876285aa791ca5af", size = 101550, upload-time = "2026-05-18T06:03:57.59Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/96/0e/d745ce95fc74e34df802010fd0387e33db468179e6ff42b708280ab268c7/types_openpyxl-3.1.5.20260518-py3-none-any.whl", hash = "sha256:e6ca4b116c8b979ed57f3045edcd3d49c25917d6dae99e90358f41322a19d375", size = 165744, upload-time = "2026-05-18T06:03:56.036Z" },
+]
+
+[[package]]
+name = "types-reportlab"
+version = "4.5.1.20260712"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/64/bc/cb7e7d7c4077216626791f094873a917ccfe31035daaa6d85d7aaf75bbc2/types_reportlab-4.5.1.20260712.tar.gz", hash = "sha256:7c7a64b21abfb811dd323e47d6be409666820dadb587d6c2e771237b99446ac1", size = 72451, upload-time = "2026-07-12T05:13:24.037Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/2c/cc3702c5e34eca04e243fb31dbeeda444f087590c54a6b56e2ebb1d1401e/types_reportlab-4.5.1.20260712-py3-none-any.whl", hash = "sha256:11e6bc24576d2c9f935e419b299b609b6253a9caad475e7b775fe38ed426684a", size = 113013, upload-time = "2026-07-12T05:13:23.023Z" },
 ]
 
 [[package]]

@@ -41,7 +41,9 @@ from app.models import (
     TraceLink,
     Workspace,
 )
+from app.models import AuditActorType
 from app.services.ai.adapter import AIAdapter, GenerationRequest, Message
+from app.services.audit import record_audit_event
 from app.services.ai.prompts.generation_v1 import (
     CLUSTERING_V1,
     EPICS_V1,
@@ -407,5 +409,16 @@ async def run_generation(
         "source_coverage": round(len(cited_ids) / len(fragments), 3) if fragments else 0,
         "fragment_count": len(fragments),
     }
+    # AI-actor audit event, same transaction as the run's items/stats (Issue 8.1).
+    record_audit_event(
+        session,
+        workspace_id=project.workspaceId,
+        project_id=project_id,
+        action="generation.run_completed",
+        entity_type="GenerationRun",
+        entity_id=run.id,
+        actor_type=AuditActorType.AI,
+        after=dict(run.stats),
+    )
     await session.commit()
     return run

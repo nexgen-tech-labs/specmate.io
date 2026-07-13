@@ -110,6 +110,7 @@ class User(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     email: Mapped[str] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String)
+    passwordHash: Mapped[str] = mapped_column(String)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
@@ -232,16 +233,48 @@ class PublishedItem(Base):
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class AuditActorType(str, enum.Enum):
+    USER = "USER"
+    SYSTEM = "SYSTEM"
+    AI = "AI"
+
+
 class AuditEvent(Base):
+    """Append-only (Issue 8.1) — a Postgres trigger rejects UPDATE/DELETE; write
+    rows into the same session/transaction as the action they describe so a failed
+    audit write rolls the action back."""
+
     __tablename__ = "AuditEvent"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    projectId: Mapped[str | None] = mapped_column(String, nullable=True)
     actorUserId: Mapped[str | None] = mapped_column(ForeignKey("User.id"), nullable=True)
+    actorType: Mapped[AuditActorType] = mapped_column(
+        Enum(AuditActorType, name="AuditActorType", create_type=False),
+        default=AuditActorType.USER,
+    )
     action: Mapped[str] = mapped_column(String)
     entityType: Mapped[str] = mapped_column(String)
     entityId: Mapped[str] = mapped_column(String)
+    beforeState: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    afterState: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     metadata_: Mapped[dict[str, object] | None] = mapped_column("metadata", JSONB, nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+
+
+class Snapshot(Base):
+    """Point-in-time project trace-map export (Issue 8.4). Immutable once created —
+    `data` is the artifact; PDF rendering reads from it, never live tables."""
+
+    __tablename__ = "Snapshot"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
+    createdByUserId: Mapped[str | None] = mapped_column(String, nullable=True)
+    kind: Mapped[str] = mapped_column(String, default="TRACE_MAP")
+    data: Mapped[dict[str, object]] = mapped_column(JSONB)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
 
 

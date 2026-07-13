@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.models import (
+    AuditActorType,
     DraftItem,
     DraftItemStatus,
     Project,
@@ -25,6 +26,7 @@ from app.models import (
     TraceLink,
     Workspace,
 )
+from app.services.audit import record_audit_event
 from app.services.connectors.ado_auth import AdoConnection, check_connection_health, get_ado_connection
 from app.services.connectors.ado_publish import (
     AdoPublishOutcome,
@@ -193,6 +195,8 @@ async def get_ado_mapping(
 
 class AdoPublishBody(BaseModel):
     item_ids: list[str]
+    # Forwarded by the web proxy from the authenticated session (Issue 8.1).
+    actor_user_id: str | None = None
 
 
 class AdoPublishItemResult(BaseModel):
@@ -374,10 +378,32 @@ async def publish_to_ado(
             results.append(
                 AdoPublishItemResult(item_id=candidate.item_id, ok=True, key=outcome.key, url=outcome.url)
             )
+            record_audit_event(
+                session,
+                workspace_id=workspace.id,
+                project_id=project_id,
+                action="draft_item.published",
+                entity_type="DraftItem",
+                entity_id=candidate.item_id,
+                actor_user_id=body.actor_user_id,
+                actor_type=AuditActorType.USER,
+                after={"tool": "ADO", "key": outcome.key, "url": outcome.url},
+            )
         else:
             flags["publishError"] = outcome.error
             item.flags = flags
             results.append(AdoPublishItemResult(item_id=candidate.item_id, ok=False, error=outcome.error))
+            record_audit_event(
+                session,
+                workspace_id=workspace.id,
+                project_id=project_id,
+                action="draft_item.publish_failed",
+                entity_type="DraftItem",
+                entity_id=candidate.item_id,
+                actor_user_id=body.actor_user_id,
+                actor_type=AuditActorType.USER,
+                after={"tool": "ADO", "error": outcome.error},
+            )
         item.updatedAt = now
         await session.commit()
 

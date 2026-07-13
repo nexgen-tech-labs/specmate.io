@@ -17,6 +17,9 @@ dependencies = [
     "pypdf>=5.1.0",
     "openpyxl>=3.1.5",
     "httpx>=0.28.1",
+    # PDF rendering for snapshot exports + approval reports (Issues 8.4/8.5).
+    # Was already a dev-group dep (test fixtures) — promoted, not newly introduced.
+    "reportlab>=4.2.5",
 ]
 
 [dependency-groups]
@@ -28,6 +31,7 @@ dev = [
     "mypy>=1.14.0",
     "reportlab>=4.2.5",
     "types-openpyxl>=3.1.5",
+    "types-reportlab>=4.5.1.20260712",
 ]
 
 [tool.pytest.ini_options]

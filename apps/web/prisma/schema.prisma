@@ -100,6 +100,7 @@ model Workspace {
   auditEvents AuditEvent[]
   invites     WorkspaceInvite[]
   aiCallLogs  AiCallLog[]
+  snapshots   Snapshot[]
 }
 
 model User {
@@ -145,6 +146,7 @@ model Project {
   referenceItems  ReferenceItem[]
   generationRuns  GenerationRun[]
   publishMappings PublishMapping[]
+  snapshots       Snapshot[]
 }
 
 model Source {
@@ -262,18 +264,51 @@ model PublishedItem {
   traceLinks TraceLink[]
 }
 
+enum AuditActorType {
+  USER
+  SYSTEM
+  AI
+}
+
+// Append-only: a DB trigger (see migration add_audit_immutability_and_snapshots)
+// rejects UPDATE/DELETE unless the maintenance GUC is set — no application path
+// may mutate an existing event (Issue 8.1).
 model AuditEvent {
-  id          String   @id @default(cuid())
+  id          String         @id @default(cuid())
   workspaceId String
+  projectId   String?
   actorUserId String?
+  actorType   AuditActorType @default(USER)
   action      String
   entityType  String
   entityId    String
+  beforeState Json?
+  afterState  Json?
   metadata    Json?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime       @default(now())
 
   workspace Workspace @relation(fields: [workspaceId], references: [id])
   actor     User?     @relation(fields: [actorUserId], references: [id])
+
+  @@index([workspaceId, projectId, createdAt])
+}
+
+// Point-in-time export of a project's full trace map (Issue 8.4). Immutable once
+// generated — the stored JSON is the artifact; PDF renders read from `data`, never
+// from live tables, so the snapshot stays valid if underlying data later changes.
+// No updatedAt/deletedAt (same append-only convention as AuditEvent); a DB trigger
+// rejects UPDATE.
+model Snapshot {
+  id              String   @id @default(cuid())
+  workspaceId     String
+  projectId       String
+  createdByUserId String?
+  kind            String   @default("TRACE_MAP")
+  data            Json
+  createdAt       DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  project   Project   @relation(fields: [projectId], references: [id])
 }
 
 // Immutable log of every AI adapter call — no deletedAt/updatedAt, same convention

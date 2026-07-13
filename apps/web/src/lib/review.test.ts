@@ -49,7 +49,13 @@ describe('review decisions (Epic 4)', () => {
   });
 
   afterAll(async () => {
-    await prisma.auditEvent.deleteMany({ where: { workspaceId } });
+    // AuditEvent is trigger-protected (append-only, Issue 8.1); test-database cleanup
+    // is the one sanctioned use of the maintenance GUC, and it must share the trigger's
+    // session — hence a single transaction.
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(`SET LOCAL specmate.maintenance = 'on'`),
+      prisma.auditEvent.deleteMany({ where: { workspaceId } }),
+    ]);
     await prisma.reviewDecision.deleteMany({ where: { draftItem: { projectId } } });
     await prisma.draftItem.deleteMany({ where: { projectId } });
     await prisma.workspaceMember.deleteMany({ where: { workspaceId } });
