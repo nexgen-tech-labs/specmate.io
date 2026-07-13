@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     confluence_base_url: str = ""  # e.g. https://yourorg.atlassian.net (wiki path added by client)
     ado_org_url: str = ""  # e.g. https://dev.azure.com/yourorg
     ado_pat: str = ""
+    # Azure AD app registration for ADO OAuth (Issue 6.1) — optional; when all three
+    # are set, ado_auth.get_ado_connection() prefers OAuth over the PAT above.
+    azure_ad_client_id: str = ""
+    azure_ad_client_secret: str = ""
+    azure_ad_tenant_id: str = ""
     github_token: str = ""
     slack_bot_token: str = ""
     # Duplicate-detection default similarity threshold (Issue 3.5); Workspace.duplicateThreshold overrides.

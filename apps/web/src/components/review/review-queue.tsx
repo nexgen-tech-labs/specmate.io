@@ -113,17 +113,20 @@ export function ReviewQueue({
     if (await call(`${base}/bulk`, { item_ids: ids, action, reason })) setSelected(new Set());
   }
 
-  async function publishSelected() {
+  async function publishSelectedTo(tool: 'jira' | 'ado' | 'github', label: string) {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (!window.confirm(`Publish ${ids.length} item(s) to Jira?`)) return;
+    if (!window.confirm(`Publish ${ids.length} item(s) to ${label}?`)) return;
     setBusy(true);
     setError(null);
-    const res = await fetch(`/api/workspaces/${workspaceId}/projects/${projectId}/publish/jira`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ item_ids: ids }),
-    });
+    const res = await fetch(
+      `/api/workspaces/${workspaceId}/projects/${projectId}/publish/${tool}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_ids: ids }),
+      },
+    );
     setBusy(false);
     const payload = (await res.json().catch(() => ({}))) as {
       error?: string;
@@ -209,10 +212,26 @@ export function ReviewQueue({
             <button
               type="button"
               disabled={busy}
-              onClick={() => void publishSelected()}
+              onClick={() => void publishSelectedTo('jira', 'Jira')}
               className="rounded border border-cobalt px-2 py-1 font-semibold text-cobalt"
             >
               Publish to Jira
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void publishSelectedTo('ado', 'Azure DevOps')}
+              className="rounded border border-cobalt px-2 py-1 font-semibold text-cobalt"
+            >
+              Publish to ADO
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void publishSelectedTo('github', 'GitHub')}
+              className="rounded border border-cobalt px-2 py-1 font-semibold text-cobalt"
+            >
+              Publish to GitHub
             </button>
           </span>
         ) : null}

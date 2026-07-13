@@ -337,16 +337,23 @@ model GenerationRun {
 // Stores the SpecMate->Jira type map, fixed defaults for required Jira fields with
 // no natural SpecMate value, and a refreshable snapshot of the discovered Jira
 // project metadata (issue types + fields) so publishing doesn't re-query Jira.
+enum TicketFormatMode {
+  HUMAN
+  CODING_AGENT
+  BOTH // accepted, not yet supported by publish — see format_adapter.py
+}
+
 model PublishMapping {
-  id             String        @id @default(cuid())
+  id             String            @id @default(cuid())
   projectId      String
   tool           PublishTarget
-  remoteProject  String // Jira project key
+  remoteProject  String // Jira project key / ADO project name / GitHub "owner/repo"
   typeMap        Json // {EPIC: "Epic", STORY: "Story", ...}
   fieldDefaults  Json? // {customfield_10020: "Backend", ...} fixed values for required fields
   metadata       Json? // discovery snapshot {issueTypes: [...], fetchedAt}
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
+  formatMode     TicketFormatMode  @default(HUMAN)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
 
   project Project @relation(fields: [projectId], references: [id])
 

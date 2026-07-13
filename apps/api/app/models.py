@@ -257,9 +257,16 @@ class TraceLink(Base):
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
 
+class TicketFormatMode(str, enum.Enum):
+    HUMAN = "HUMAN"
+    CODING_AGENT = "CODING_AGENT"
+    BOTH = "BOTH"
+
+
 class PublishMapping(Base):
-    """Per-project publish configuration for a target tool (Epic 5) — type map,
-    fixed defaults for required remote fields, and a cached discovery snapshot."""
+    """Per-project publish configuration for a target tool (Epics 5-7) — type map,
+    fixed defaults for required remote fields, a cached discovery snapshot, and the
+    ticket format mode (Human/Coding Agent/Both)."""
 
     __tablename__ = "PublishMapping"
 
@@ -272,6 +279,10 @@ class PublishMapping(Base):
     typeMap: Mapped[dict[str, object]] = mapped_column(JSONB)
     fieldDefaults: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     metadata_: Mapped[dict[str, object] | None] = mapped_column("metadata", JSONB, nullable=True)
+    formatMode: Mapped[TicketFormatMode] = mapped_column(
+        Enum(TicketFormatMode, name="TicketFormatMode", create_type=False),
+        default=TicketFormatMode.HUMAN,
+    )
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
