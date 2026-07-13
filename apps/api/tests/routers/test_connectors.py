@@ -120,6 +120,9 @@ def _fake_fetchers(items: list[ReferenceItemData]) -> ConnectorFetchers:
 
     from app.models import PublishTarget
 
+    async def fake_names(user_ids: set[str]) -> dict[str, str]:
+        return {"U1": "Priya N"}
+
     return ConnectorFetchers(
         reference={
             PublishTarget.JIRA: fake_reference,
@@ -128,6 +131,7 @@ def _fake_fetchers(items: list[ReferenceItemData]) -> ConnectorFetchers:
         },
         confluence_page=fake_page,
         slack_messages=fake_slack,
+        slack_user_names=fake_names,
     )
 
 
@@ -216,5 +220,24 @@ def test_slack_channel_sync_creates_source_with_filtered_chunks() -> None:
     payload = response.json()
     assert payload["name"] == "#payments"
     assert payload["chunk_count"] == 1  # bot message filtered out
+
+    async def fetch_chunk_text() -> str:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                row = (
+                    await session.execute(
+                        select(RawRequirement)
+                        .join(Source, Source.id == RawRequirement.sourceId)
+                        .where(Source.projectId == ids["project_id"])
+                    )
+                ).scalars().first()
+                assert row is not None
+                return row.text
+        finally:
+            await engine.dispose()
+
+    # Author resolved to a display name, not a raw Slack user ID.
+    assert asyncio.run(fetch_chunk_text()).startswith("Priya N:")
 
     asyncio.run(_cleanup(ids))

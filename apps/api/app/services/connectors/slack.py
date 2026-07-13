@@ -29,10 +29,13 @@ def _format_ts(slack_ts: str) -> str:
 
 
 def filter_and_chunk_messages(
-    messages: list[dict[str, object]], channel_label: str
+    messages: list[dict[str, object]],
+    channel_label: str,
+    user_names: dict[str, str] | None = None,
 ) -> list[ParsedChunk]:
     """Pure filtering/chunking: one chunk per human message, oldest first, pointer
-    "#{channel}@{timestamp}", text "{author}: {message}"."""
+    "#{channel}@{timestamp}", text "{author}: {message}". user_names maps Slack user
+    IDs to display names (resolved via users:read); unresolved IDs pass through."""
     ordered = sorted(messages, key=lambda m: str(m.get("ts", "")))
     chunks: list[ParsedChunk] = []
     order = 0
@@ -42,7 +45,8 @@ def filter_and_chunk_messages(
         text = str(message.get("text") or "").strip()
         if not text:
             continue
-        author = str(message.get("user") or "unknown")
+        user_id = str(message.get("user") or "unknown")
+        author = (user_names or {}).get(user_id, user_id)
         ts = _format_ts(str(message.get("ts", "")))
         chunks.append(
             ParsedChunk(
@@ -91,3 +95,27 @@ async def fetch_slack_messages(channel_id: str) -> list[dict[str, object]]:
                 break
 
     return messages
+
+
+async def fetch_user_names(user_ids: set[str]) -> dict[str, str]:
+    """Resolves Slack user IDs to display names (users:read scope). Best-effort —
+    a failed lookup just leaves that ID unresolved rather than failing the sync."""
+    if not settings.slack_bot_token or not user_ids:
+        return {}
+    headers = {"Authorization": f"Bearer {settings.slack_bot_token}"}
+    names: dict[str, str] = {}
+    async with httpx.AsyncClient(headers=headers, timeout=30) as client:
+        for user_id in user_ids:
+            try:
+                response = await client.get(
+                    "https://slack.com/api/users.info", params={"user": user_id}
+                )
+                payload = response.json()
+            except (httpx.HTTPError, ValueError):
+                continue
+            if payload.get("ok"):
+                profile = payload.get("user", {})
+                name = profile.get("profile", {}).get("display_name") or profile.get("real_name")
+                if name:
+                    names[user_id] = str(name)
+    return names

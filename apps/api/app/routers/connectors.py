@@ -32,7 +32,11 @@ from app.services.connectors.confluence import (
 )
 from app.services.connectors.github import fetch_github_issues
 from app.services.connectors.jira import fetch_jira_issues
-from app.services.connectors.slack import fetch_slack_messages, filter_and_chunk_messages
+from app.services.connectors.slack import (
+    fetch_slack_messages,
+    fetch_user_names,
+    filter_and_chunk_messages,
+)
 from app.services.connectors.types import ConnectorError, ReferenceItemData
 
 router = APIRouter()
@@ -51,6 +55,7 @@ class ConnectorFetchers:
     )
     confluence_page: Callable[[str], Awaitable[ConfluencePage]] = fetch_confluence_page
     slack_messages: Callable[[str], Awaitable[list[dict[str, object]]]] = fetch_slack_messages
+    slack_user_names: Callable[[set[str]], Awaitable[dict[str, str]]] = fetch_user_names
 
 
 def get_connector_fetchers() -> ConnectorFetchers:
@@ -229,7 +234,13 @@ async def sync_slack_channel(
     channel_label = body.channel_name or channel_id
     try:
         messages = await fetchers.slack_messages(channel_id)
-        chunks = filter_and_chunk_messages(messages, channel_label)
+        user_ids = {
+            str(m.get("user"))
+            for m in messages
+            if m.get("user") and not m.get("bot_id") and not m.get("subtype")
+        }
+        user_names = await fetchers.slack_user_names(user_ids)
+        chunks = filter_and_chunk_messages(messages, channel_label, user_names)
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
