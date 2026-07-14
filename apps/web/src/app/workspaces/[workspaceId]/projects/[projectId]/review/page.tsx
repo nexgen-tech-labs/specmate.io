@@ -103,12 +103,26 @@ export default async function ReviewPage({
               Generated items for {project.name} — approve, edit, or reject before publishing.
             </p>
           </div>
-          <Link
-            href={`/workspaces/${workspaceId}/projects/${projectId}/review/activity`}
-            className="text-sm text-cobalt underline-offset-2 hover:underline"
-          >
-            Activity feed →
-          </Link>
+          <div className="flex flex-col items-end gap-1">
+            <Link
+              href={`/workspaces/${workspaceId}/projects/${projectId}/review/activity`}
+              className="text-sm text-cobalt underline-offset-2 hover:underline"
+            >
+              Activity feed →
+            </Link>
+            <Link
+              href={`/workspaces/${workspaceId}/projects/${projectId}/audit`}
+              className="text-sm text-cobalt underline-offset-2 hover:underline"
+            >
+              Audit trail →
+            </Link>
+            <Link
+              href={`/workspaces/${workspaceId}/projects/${projectId}/exports`}
+              className="text-sm text-cobalt underline-offset-2 hover:underline"
+            >
+              Exports →
+            </Link>
+          </div>
         </div>
         <ReviewQueue
           workspaceId={workspaceId}
