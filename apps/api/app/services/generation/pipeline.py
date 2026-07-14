@@ -409,6 +409,10 @@ async def run_generation(
         "source_coverage": round(len(cited_ids) / len(fragments), 3) if fragments else 0,
         "fragment_count": len(fragments),
     }
+    # Time-to-first-value instrumentation (Issue 10.10) — stamped once, the first
+    # generation run a workspace ever completes.
+    if workspace.firstGenerationAt is None:
+        workspace.firstGenerationAt = datetime.now(UTC).replace(tzinfo=None)
     # AI-actor audit event, same transaction as the run's items/stats (Issue 8.1).
     record_audit_event(
         session,

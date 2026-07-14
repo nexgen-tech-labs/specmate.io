@@ -47,7 +47,18 @@ function uploadWithProgress(
   });
 }
 
-export function UploadZone({ workspaceId, projectId }: { workspaceId: string; projectId: string }) {
+export function UploadZone({
+  workspaceId,
+  projectId,
+  onUploaded,
+}: {
+  workspaceId: string;
+  projectId: string;
+  /** Called with each successfully-uploaded source, in addition to the normal
+   * router.refresh() — lets a parent (e.g. the onboarding wizard) react without
+   * re-fetching. Optional; existing callers are unaffected. */
+  onUploaded?: (source: Source) => void;
+}) {
   const router = useRouter();
   const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
@@ -84,13 +95,14 @@ export function UploadZone({ workspaceId, projectId }: { workspaceId: string; pr
         }
         setUploaded((prev) => [body.source as Source, ...prev]);
         setProgress(null);
+        onUploaded?.(body.source as Source);
         router.refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Upload failed.');
         setProgress(null);
       }
     },
-    [workspaceId, projectId, router],
+    [workspaceId, projectId, router, onUploaded],
   );
 
   return (

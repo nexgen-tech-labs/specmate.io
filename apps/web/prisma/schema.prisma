@@ -91,6 +91,10 @@ model Workspace {
   duplicateThreshold Float?
   // 1 = single-reviewer approval (default); 2 = reviewer approval + ADMIN sign-off (Issue 4.7).
   approvalStages Int @default(1)
+  // Time-to-first-value instrumentation (Issue 10.10): stamped once, the first time
+  // this workspace's first generation run completes. createdAt is the signup moment,
+  // so (firstGenerationAt - createdAt) is the workspace's actual time-to-first-value.
+  firstGenerationAt DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?

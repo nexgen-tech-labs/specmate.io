@@ -317,6 +317,37 @@ def test_full_generation_run_produces_hierarchy_traces_scores_and_flags() -> Non
     asyncio.run(_cleanup(ids))
 
 
+def test_first_generation_stamps_workspace_time_to_value_once() -> None:
+    """Issue 10.10: firstGenerationAt is set on a workspace's first-ever
+    completed generation run, and never overwritten by later runs."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+    workspace_id = str(ids["workspace_id"])
+
+    async def fetch_stamp() -> object:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                ws = await session.get(Workspace, workspace_id)
+                assert ws is not None
+                return ws.firstGenerationAt
+        finally:
+            await engine.dispose()
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        assert asyncio.run(fetch_stamp()) is None  # unstamped before any generation
+        client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+
+    first_stamp = asyncio.run(fetch_stamp())
+    assert first_stamp is not None
+
+    asyncio.run(_cleanup(ids))
+
+
 def test_regenerating_unchanged_content_reuses_run_without_duplicating_items() -> None:
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]

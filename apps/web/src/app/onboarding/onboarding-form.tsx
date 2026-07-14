@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { signIn } from 'next-auth/react';
 
-type Step = 'account' | 'workspace' | 'done';
+type Step = 'account' | 'workspace';
 
 export function OnboardingForm() {
   const router = useRouter();
@@ -103,6 +103,7 @@ export function OnboardingForm() {
               setSubmitting(false);
               return;
             }
+            const { workspaceId }: { workspaceId: string } = await res.json();
 
             const result = await signIn('credentials', { email, password, redirect: false });
             if (result?.error) {
@@ -111,8 +112,9 @@ export function OnboardingForm() {
               return;
             }
 
-            setStep('done');
-            router.refresh();
+            // Straight into the workspace dashboard (Issue 10.10) — a brand-new
+            // workspace's empty state is itself the entry point to the guided wizard.
+            router.push(`/workspaces/${workspaceId}`);
           } catch {
             setError('Something went wrong. Please try again.');
             setSubmitting(false);
@@ -158,15 +160,5 @@ export function OnboardingForm() {
     );
   }
 
-  return (
-    <div className="landing-rise rounded-lg border border-line bg-panel p-8 text-center">
-      <div className="font-mono text-sm font-bold tracking-[0.06em] text-green">
-        WORKSPACE CREATED ✓
-      </div>
-      <p className="mt-4 text-base text-sub">
-        <span className="font-semibold text-ink">{workspaceName}</span> is ready. You&apos;re signed
-        in as <span className="font-semibold text-ink">{email}</span>.
-      </p>
-    </div>
-  );
+  return null;
 }

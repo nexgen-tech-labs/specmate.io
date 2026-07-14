@@ -10,6 +10,24 @@ async function findSource(workspaceId: string, projectId: string, sourceId: stri
   });
 }
 
+// Status polling — used by the onboarding wizard (Issue 10.10) to detect when a
+// just-uploaded source finishes the synchronous parse (QUEUED/PARSING/PARSED/FAILED).
+export async function GET(_request: Request, { params }: Params) {
+  const { workspaceId, projectId, sourceId } = await params;
+
+  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
+  if (!access.ok) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: access.status });
+  }
+
+  const source = await findSource(workspaceId, projectId, sourceId);
+  if (!source) {
+    return NextResponse.json({ error: 'Source not found.' }, { status: 404 });
+  }
+
+  return NextResponse.json({ id: source.id, status: source.status, parseError: source.parseError });
+}
+
 // Soft-delete: the Source and its RawRequirements get deletedAt stamped (removed from
 // active use), rows are never hard-deleted, and an AuditEvent records the action — so
 // historical trace/audit records keep resolving.

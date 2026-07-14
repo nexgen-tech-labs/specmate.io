@@ -99,6 +99,7 @@ class Workspace(Base):
     name: Mapped[str] = mapped_column(String)
     duplicateThreshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     approvalStages: Mapped[int] = mapped_column(Integer, default=1)
+    firstGenerationAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

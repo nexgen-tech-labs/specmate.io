@@ -40,7 +40,7 @@ export async function POST(request: Request) {
 
   const passwordHash = await hashPassword(body.password);
 
-  await prisma.$transaction(async (tx) => {
+  const { workspace } = await prisma.$transaction(async (tx) => {
     const user = await tx.user.create({
       data: { name: body.name, email: body.email, passwordHash },
     });
@@ -53,5 +53,7 @@ export async function POST(request: Request) {
     return { user, workspace };
   });
 
-  return NextResponse.json({ ok: true }, { status: 201 });
+  // workspaceId lets the client route straight into the workspace dashboard
+  // (Issue 10.10) instead of dead-ending on a static "done" screen.
+  return NextResponse.json({ ok: true, workspaceId: workspace.id }, { status: 201 });
 }

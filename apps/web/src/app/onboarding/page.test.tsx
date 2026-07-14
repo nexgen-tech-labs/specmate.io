@@ -19,7 +19,9 @@ describe('OnboardingPage', () => {
     signInMock.mockResolvedValue({ error: undefined });
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) }),
+      vi
+        .fn()
+        .mockResolvedValue({ ok: true, json: async () => ({ ok: true, workspaceId: 'ws-1' }) }),
     );
   });
 
@@ -47,7 +49,7 @@ describe('OnboardingPage', () => {
     expect(screen.queryByLabelText(/workspace name/i)).toBeNull();
   });
 
-  it('completes signup end-to-end: account step, workspace step, signs in, shows confirmation', async () => {
+  it('completes signup end-to-end: account step, workspace step, signs in, redirects to the workspace dashboard', async () => {
     render(<OnboardingPage />);
 
     fireEvent.change(screen.getByLabelText(/full name/i), { target: { value: 'Jane Doe' } });
@@ -59,7 +61,7 @@ describe('OnboardingPage', () => {
     fireEvent.change(workspaceInput, { target: { value: 'Acme Corp' } });
     fireEvent.click(screen.getByRole('button', { name: /create workspace/i }));
 
-    await waitFor(() => expect(screen.getByText('WORKSPACE CREATED ✓')).toBeDefined());
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/workspaces/ws-1'));
 
     expect(global.fetch).toHaveBeenCalledWith(
       '/api/signup',
@@ -78,7 +80,6 @@ describe('OnboardingPage', () => {
       password: 'password123',
       redirect: false,
     });
-    expect(screen.getByText('Acme Corp')).toBeDefined();
   });
 
   it('shows an error if the signup API call fails', async () => {
