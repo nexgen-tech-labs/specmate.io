@@ -14,6 +14,7 @@
     "prisma:seed": "prisma db seed"
   },
   "dependencies": {
+    "@atlassian/atlassian-jwt": "^2.2.0",
     "@azure/storage-blob": "^12.33.0",
     "@prisma/client": "^6.2.1",
     "@specmate/types": "workspace:*",

@@ -21,6 +21,7 @@ dependencies = [
     # Was already a dev-group dep (test fixtures) — promoted, not newly introduced.
     "reportlab>=4.2.5",
     "stripe>=15.3.0",
+    "pyjwt>=2.13.0",
 ]
 
 [dependency-groups]

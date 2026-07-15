@@ -323,6 +323,29 @@ class UsagePeriod(Base):
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
 
+class AtlassianConnectInstall(Base):
+    """One row per Jira Cloud site with the SpecMate Connect app installed
+    (Issue 10.2) — read-only from apps/api's side; apps/web's lifecycle
+    webhooks (installed/uninstalled) and the workspace-claim endpoint own
+    writes. Used here only to resolve a ConnectJwtConnection for a claimed
+    workspace (see jira_auth.get_connect_connection_for_workspace)."""
+
+    __tablename__ = "AtlassianConnectInstall"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    clientKey: Mapped[str] = mapped_column(String, unique=True)
+    sharedSecret: Mapped[str] = mapped_column(String)
+    baseUrl: Mapped[str] = mapped_column(String)
+    displayUrl: Mapped[str | None] = mapped_column(String, nullable=True)
+    productType: Mapped[str | None] = mapped_column(String, nullable=True)
+    installedAt: Mapped[datetime] = mapped_column(DateTime)
+    uninstalledAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    workspaceId: Mapped[str | None] = mapped_column(ForeignKey("Workspace.id"), nullable=True)
+    claimedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
+
+
 class TraceLink(Base):
     __tablename__ = "TraceLink"
 

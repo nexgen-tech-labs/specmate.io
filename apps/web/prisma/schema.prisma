@@ -127,13 +127,42 @@ model Workspace {
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
 
-  members      WorkspaceMember[]
-  projects     Project[]
-  auditEvents  AuditEvent[]
-  invites      WorkspaceInvite[]
-  aiCallLogs   AiCallLog[]
-  snapshots    Snapshot[]
-  usagePeriods UsagePeriod[]
+  members                   WorkspaceMember[]
+  projects                  Project[]
+  auditEvents               AuditEvent[]
+  invites                   WorkspaceInvite[]
+  aiCallLogs                AiCallLog[]
+  snapshots                 Snapshot[]
+  usagePeriods              UsagePeriod[]
+  atlassianConnectInstalls  AtlassianConnectInstall[]
+}
+
+// One row per Jira Cloud site that has installed the SpecMate Atlassian
+// Connect app (Issue 10.2) — multi-tenant by design: many customer sites can
+// each independently install/uninstall, distinct from the single-tenant
+// env-configured CloudTokenConnection used by direct OAuth/API-token auth
+// (Issue 5.1). `workspaceId` is nullable because Atlassian POSTs the
+// `installed` lifecycle callback *before* any SpecMate workspace is known to
+// be associated with it — an admin claims the install (links it to a
+// workspace) afterward via a settings page. `clientKey` is the stable
+// per-site identifier Atlassian sends on every lifecycle/request callback;
+// `sharedSecret` signs/verifies the JWTs both directions (Atlassian -> app on
+// incoming requests, app -> Jira on outgoing API calls, "2-Legged JWT").
+model AtlassianConnectInstall {
+  id            String    @id @default(cuid())
+  clientKey     String    @unique
+  sharedSecret  String
+  baseUrl       String
+  displayUrl    String?
+  productType   String?
+  installedAt   DateTime  @default(now())
+  uninstalledAt DateTime?
+  workspaceId   String?
+  claimedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id])
 }
 
 // One row per workspace per billing period (calendar month, UTC) — the metered
