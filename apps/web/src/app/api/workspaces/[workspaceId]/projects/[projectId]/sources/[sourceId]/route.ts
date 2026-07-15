@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { requireProjectRole } from '@/lib/workspace-context';
 
 type Params = { params: Promise<{ workspaceId: string; projectId: string; sourceId: string }> };
 
@@ -15,9 +15,11 @@ async function findSource(workspaceId: string, projectId: string, sourceId: stri
 export async function GET(_request: Request, { params }: Params) {
   const { workspaceId, projectId, sourceId } = await params;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER', 'VIEWER']);
   if (!access.ok) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: access.status });
+    return access.status === 404
+      ? NextResponse.json({ error: 'Project not found.' }, { status: 404 })
+      : NextResponse.json({ error: 'Forbidden' }, { status: access.status });
   }
 
   const source = await findSource(workspaceId, projectId, sourceId);
@@ -34,9 +36,11 @@ export async function GET(_request: Request, { params }: Params) {
 export async function DELETE(_request: Request, { params }: Params) {
   const { workspaceId, projectId, sourceId } = await params;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER']);
   if (!access.ok) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: access.status });
+    return access.status === 404
+      ? NextResponse.json({ error: 'Project not found.' }, { status: 404 })
+      : NextResponse.json({ error: 'Forbidden' }, { status: access.status });
   }
 
   const source = await findSource(workspaceId, projectId, sourceId);

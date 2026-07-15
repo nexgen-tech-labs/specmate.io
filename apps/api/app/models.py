@@ -106,11 +106,45 @@ class SubscriptionStatus(str, enum.Enum):
     INCOMPLETE = "INCOMPLETE"
 
 
+class OrgRole(str, enum.Enum):
+    OWNER = "OWNER"
+    ADMIN = "ADMIN"
+
+
+class Organization(Base):
+    """Top of the tenancy hierarchy (Issue 12.10): Organization → Workspace →
+    Team → User. apps/api only mirrors these for schema completeness — all
+    authorization decisions happen in apps/web (the auth boundary); apps/api
+    keeps internal-only ingress."""
+
+    __tablename__ = "Organization"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    name: Mapped[str] = mapped_column(String)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
+    deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class OrganizationMember(Base):
+    __tablename__ = "OrganizationMember"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    organizationId: Mapped[str] = mapped_column(ForeignKey("Organization.id"))
+    userId: Mapped[str] = mapped_column(ForeignKey("User.id"))
+    role: Mapped[OrgRole] = mapped_column(Enum(OrgRole, name="OrgRole", create_type=False))
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
+
+
 class Workspace(Base):
     __tablename__ = "Workspace"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     name: Mapped[str] = mapped_column(String)
+    organizationId: Mapped[str | None] = mapped_column(
+        ForeignKey("Organization.id"), nullable=True
+    )
     duplicateThreshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     approvalStages: Mapped[int] = mapped_column(Integer, default=1)
     firstGenerationAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -149,6 +183,38 @@ class WorkspaceMember(Base):
     role: Mapped[Role] = mapped_column(Enum(Role, name="Role", create_type=False))
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
+
+
+class Team(Base):
+    """Permission-scoping group within a Workspace (Issues 12.10/12.11) — see
+    schema.prisma's Team model comment for the restriction semantics."""
+
+    __tablename__ = "Team"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    name: Mapped[str] = mapped_column(String)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
+    deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class TeamMember(Base):
+    __tablename__ = "TeamMember"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    teamId: Mapped[str] = mapped_column(ForeignKey("Team.id"))
+    userId: Mapped[str] = mapped_column(ForeignKey("User.id"))
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+
+
+class TeamProject(Base):
+    __tablename__ = "TeamProject"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    teamId: Mapped[str] = mapped_column(ForeignKey("Team.id"))
+    projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
 
 
 class Project(Base):

@@ -40,12 +40,22 @@ export async function POST(request: Request) {
 
   const passwordHash = await hashPassword(body.password);
 
+  // Full hierarchy at signup (Issue 12.10): Organization → Workspace → User,
+  // with the signing-up user as org OWNER + workspace ADMIN. The org is named
+  // after the workspace (implicit single-workspace org) — renaming/growing it
+  // into a multi-workspace org happens later via org management.
   const { workspace } = await prisma.$transaction(async (tx) => {
     const user = await tx.user.create({
       data: { name: body.name, email: body.email, passwordHash },
     });
-    const workspace = await tx.workspace.create({
+    const organization = await tx.organization.create({
       data: { name: body.workspaceName },
+    });
+    const workspace = await tx.workspace.create({
+      data: { name: body.workspaceName, organizationId: organization.id },
+    });
+    await tx.organizationMember.create({
+      data: { organizationId: organization.id, userId: user.id, role: 'OWNER' },
     });
     await tx.workspaceMember.create({
       data: { workspaceId: workspace.id, userId: user.id, role: 'ADMIN' },

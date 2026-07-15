@@ -56,12 +56,18 @@ export interface TraceChain {
 export async function traceByExternalKey(
   workspaceId: string,
   externalKey: string,
+  accessibleProjectIds?: Set<string> | null,
 ): Promise<TraceChain[]> {
   const published = await prisma.publishedItem.findMany({
     where: {
       externalKey: { equals: externalKey.trim(), mode: 'insensitive' },
       deletedAt: null,
-      draftItem: { project: { workspaceId } },
+      draftItem: {
+        project: {
+          workspaceId,
+          ...(accessibleProjectIds ? { id: { in: [...accessibleProjectIds] } } : {}),
+        },
+      },
     },
     include: {
       draftItem: {
@@ -137,9 +143,16 @@ export interface SourceContribution {
 export async function traceBySource(
   workspaceId: string,
   sourceId: string,
+  accessibleProjectIds?: Set<string> | null,
 ): Promise<SourceContribution[] | null> {
   const source = await prisma.source.findFirst({
-    where: { id: sourceId, project: { workspaceId } },
+    where: {
+      id: sourceId,
+      project: {
+        workspaceId,
+        ...(accessibleProjectIds ? { id: { in: [...accessibleProjectIds] } } : {}),
+      },
+    },
   });
   if (!source) return null;
 
@@ -188,9 +201,19 @@ export async function traceBySource(
 
 /** Item-level trace (for the "view full trace" panel, Issue 8.3): the same chain
  * as traceByExternalKey but keyed by draft item id, publish optional. */
-export async function traceByItem(workspaceId: string, itemId: string) {
+export async function traceByItem(
+  workspaceId: string,
+  itemId: string,
+  accessibleProjectIds?: Set<string> | null,
+) {
   const item = await prisma.draftItem.findFirst({
-    where: { id: itemId, project: { workspaceId } },
+    where: {
+      id: itemId,
+      project: {
+        workspaceId,
+        ...(accessibleProjectIds ? { id: { in: [...accessibleProjectIds] } } : {}),
+      },
+    },
     include: {
       reviewDecisions: {
         include: { actor: { select: { name: true, email: true } } },

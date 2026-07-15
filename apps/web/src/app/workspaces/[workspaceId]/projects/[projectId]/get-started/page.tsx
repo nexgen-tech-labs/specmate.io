@@ -1,5 +1,5 @@
 import { notFound } from 'next/navigation';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { OnboardingWizard } from '@/components/onboarding/onboarding-wizard';
 
@@ -14,11 +14,10 @@ export default async function GetStartedPage({
 }) {
   const { workspaceId, projectId } = await params;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER']);
   if (!access.ok) notFound();
 
-  const project = await prisma.project.findFirst({ where: { id: projectId, workspaceId } });
-  if (!project) notFound();
+  const project = access.project;
 
   const [sourceCount, mappingCount] = await Promise.all([
     prisma.source.count({ where: { projectId, deletedAt: null } }),

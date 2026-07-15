@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { prisma } from '@/lib/prisma';
+import { requireProjectRole } from '@/lib/workspace-context';
 import { applyDecision, type DecisionAction } from '@/lib/review';
 
 type Params = { params: Promise<{ workspaceId: string; projectId: string }> };
@@ -8,11 +9,13 @@ type Params = { params: Promise<{ workspaceId: string; projectId: string }> };
 // through the same applyDecision path, producing per-item ReviewDecision + AuditEvent
 // rows identical to individual actions.
 export async function POST(request: Request, { params }: Params) {
-  const { workspaceId } = await params;
+  const { workspaceId, projectId } = await params;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER']);
   if (!access.ok) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: access.status });
+    return access.status === 404
+      ? NextResponse.json({ error: 'Project not found.' }, { status: 404 })
+      : NextResponse.json({ error: 'Forbidden' }, { status: access.status });
   }
 
   const body = (await request.json()) as {
@@ -27,8 +30,23 @@ export async function POST(request: Request, { params }: Params) {
     return NextResponse.json({ error: 'Bulk supports approve or reject.' }, { status: 400 });
   }
 
+  // Team-scope containment (Issue 12.11): only items in the URL's project are
+  // processed — out-of-project ids fail per-item instead of failing the batch.
+  const inProject = new Set(
+    (
+      await prisma.draftItem.findMany({
+        where: { id: { in: body.item_ids }, projectId },
+        select: { id: true },
+      })
+    ).map((i) => i.id),
+  );
+
   const results: Array<{ item_id: string; ok: boolean; error?: string }> = [];
   for (const itemId of body.item_ids) {
+    if (!inProject.has(itemId)) {
+      results.push({ item_id: itemId, ok: false, error: 'Item not found in this project.' });
+      continue;
+    }
     const result = await applyDecision(itemId, {
       action: body.action,
       reason: body.reason,

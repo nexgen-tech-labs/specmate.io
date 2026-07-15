@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { getAccessibleProjectIds, requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { traceByExternalKey } from '@/lib/trace';
 import type { Prisma } from '@prisma/client';
@@ -23,10 +23,9 @@ export default async function AuditTrailPage({
   const { workspaceId, projectId } = await params;
   const filters = await searchParams;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER', 'VIEWER']);
   if (!access.ok) notFound();
-  const project = await prisma.project.findFirst({ where: { id: projectId, workspaceId } });
-  if (!project) notFound();
+  const project = access.project;
 
   // Events with projectId (new writes) plus legacy project events written before the
   // projectId column existed (entityId ∈ this project's items).
@@ -74,7 +73,13 @@ export default async function AuditTrailPage({
     entityTitles.set(s.id, s.name);
   }
 
-  const traceChains = filters.key ? await traceByExternalKey(workspaceId, filters.key) : null;
+  // Trace search from a project's audit page still searches workspace-wide (an
+  // external key can live in any project), but team-scoped members only resolve
+  // chains within their scoped projects (Issue 12.11).
+  const accessibleIds = await getAccessibleProjectIds(workspaceId, access.membership);
+  const traceChains = filters.key
+    ? await traceByExternalKey(workspaceId, filters.key, accessibleIds)
+    : null;
 
   const base = `/workspaces/${workspaceId}/projects/${projectId}/audit`;
 

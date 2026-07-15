@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { getAccessibleProjectIds, requireWorkspaceRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { NewProjectForm } from '@/components/workspace/new-project-form';
 
@@ -21,8 +21,15 @@ export default async function WorkspaceDashboardPage({
   const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } });
   if (!workspace) notFound();
 
+  // Team scoping (Issue 12.11): a project-scoped member's dashboard only lists
+  // the projects their teams are scoped to; null = unrestricted.
+  const accessibleIds = await getAccessibleProjectIds(workspaceId, access.membership);
   const projects = await prisma.project.findMany({
-    where: { workspaceId, deletedAt: null },
+    where: {
+      workspaceId,
+      deletedAt: null,
+      ...(accessibleIds ? { id: { in: [...accessibleIds] } } : {}),
+    },
     orderBy: { createdAt: 'desc' },
     include: {
       _count: { select: { sources: true, draftItems: true } },

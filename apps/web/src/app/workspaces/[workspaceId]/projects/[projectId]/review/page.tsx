@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { ReviewQueue, type ReviewItem } from '@/components/review/review-queue';
 
@@ -14,7 +14,7 @@ export default async function ReviewPage({
   const { workspaceId, projectId } = await params;
   const filters = await searchParams;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER', 'VIEWER']);
   if (!access.ok) notFound();
 
   const project = await prisma.project.findFirst({

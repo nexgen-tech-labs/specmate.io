@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { prisma } from '@/lib/prisma';
+import { requireProjectRole } from '@/lib/workspace-context';
 import { markGapResolved } from '@/lib/review';
 
 type Params = { params: Promise<{ workspaceId: string; projectId: string; itemId: string }> };
@@ -9,12 +10,23 @@ type Params = { params: Promise<{ workspaceId: string; projectId: string; itemId
 // manually (typically after an inline edit). Both clear the gap flag; the audit trail
 // distinguishes the two.
 export async function POST(request: Request, { params }: Params) {
-  const { workspaceId, itemId } = await params;
+  const { workspaceId, projectId, itemId } = await params;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER']);
   if (!access.ok) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: access.status });
+    return access.status === 404
+      ? NextResponse.json({ error: 'Project not found.' }, { status: 404 })
+      : NextResponse.json({ error: 'Forbidden' }, { status: access.status });
   }
+
+  // Team-scope containment (Issue 12.11): the item must belong to the project in
+  // the URL — prevents a team-scoped member reaching an out-of-scope item via an
+  // in-scope project's URL (the review lib only checks the workspace boundary).
+  const item = await prisma.draftItem.findFirst({
+    where: { id: itemId, projectId },
+    select: { id: true },
+  });
+  if (!item) return NextResponse.json({ error: 'Item not found.' }, { status: 404 });
 
   const body = (await request.json()) as { resolution?: 'manual' | 'regenerate'; answer?: string };
   const actor = {

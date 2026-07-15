@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { requireProjectRole } from '@/lib/workspace-context';
 
 type Params = { params: Promise<{ workspaceId: string; projectId: string }> };
 
@@ -30,19 +29,23 @@ async function proxy(
 
 export async function GET(_request: Request, { params }: Params) {
   const { workspaceId, projectId } = await params;
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
-  if (!access.ok) return NextResponse.json({ error: 'Forbidden' }, { status: access.status });
-  const project = await prisma.project.findFirst({ where: { id: projectId, workspaceId } });
-  if (!project) return NextResponse.json({ error: 'Project not found.' }, { status: 404 });
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER', 'VIEWER']);
+  if (!access.ok) {
+    return access.status === 404
+      ? NextResponse.json({ error: 'Project not found.' }, { status: 404 })
+      : NextResponse.json({ error: 'Forbidden' }, { status: access.status });
+  }
   return proxy('GET', projectId);
 }
 
 // Mapping configuration is a connector-setup concern — ADMIN only (Issue 5.3).
 export async function POST(request: Request, { params }: Params) {
   const { workspaceId, projectId } = await params;
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN']);
-  if (!access.ok) return NextResponse.json({ error: 'Forbidden' }, { status: access.status });
-  const project = await prisma.project.findFirst({ where: { id: projectId, workspaceId } });
-  if (!project) return NextResponse.json({ error: 'Project not found.' }, { status: 404 });
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN']);
+  if (!access.ok) {
+    return access.status === 404
+      ? NextResponse.json({ error: 'Project not found.' }, { status: 404 })
+      : NextResponse.json({ error: 'Forbidden' }, { status: access.status });
+  }
   return proxy('POST', projectId, await request.json());
 }

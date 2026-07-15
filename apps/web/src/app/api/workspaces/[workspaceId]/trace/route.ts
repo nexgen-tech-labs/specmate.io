@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { getAccessibleProjectIds, requireWorkspaceRole } from '@/lib/workspace-context';
 import { traceByExternalKey, traceByItem, traceBySource } from '@/lib/trace';
 
 type Params = { params: Promise<{ workspaceId: string }> };
@@ -9,6 +9,8 @@ type Params = { params: Promise<{ workspaceId: string }> };
 //   ?item=<id>     → full trace for one draft item (Issue 8.3's trace panel)
 //   ?source=<id>   → reverse chain: everything a source contributed to
 // Read-only — VIEWERs included (Delivery Managers checking history).
+// Team-scoped members (Issue 12.11) only resolve traces within their scoped
+// projects — workspace-wide search must not leak out-of-scope items.
 export async function GET(request: Request, { params }: Params) {
   const { workspaceId } = await params;
 
@@ -16,6 +18,7 @@ export async function GET(request: Request, { params }: Params) {
   if (!access.ok) {
     return NextResponse.json({ error: 'Forbidden' }, { status: access.status });
   }
+  const accessibleIds = await getAccessibleProjectIds(workspaceId, access.membership);
 
   const url = new URL(request.url);
   const key = url.searchParams.get('key');
@@ -23,16 +26,16 @@ export async function GET(request: Request, { params }: Params) {
   const source = url.searchParams.get('source');
 
   if (key) {
-    const chains = await traceByExternalKey(workspaceId, key);
+    const chains = await traceByExternalKey(workspaceId, key, accessibleIds);
     return NextResponse.json({ mode: 'key', chains });
   }
   if (item) {
-    const trace = await traceByItem(workspaceId, item);
+    const trace = await traceByItem(workspaceId, item, accessibleIds);
     if (!trace) return NextResponse.json({ error: 'Item not found.' }, { status: 404 });
     return NextResponse.json({ mode: 'item', trace });
   }
   if (source) {
-    const contributions = await traceBySource(workspaceId, source);
+    const contributions = await traceBySource(workspaceId, source, accessibleIds);
     if (contributions === null)
       return NextResponse.json({ error: 'Source not found.' }, { status: 404 });
     return NextResponse.json({ mode: 'source', contributions });

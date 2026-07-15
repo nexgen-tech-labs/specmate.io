@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { ProjectExports, type SnapshotRow } from '@/components/exports/project-exports';
 
@@ -12,10 +12,9 @@ export default async function ProjectExportsPage({
 }) {
   const { workspaceId, projectId } = await params;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER', 'VIEWER']);
   if (!access.ok) notFound();
-  const project = await prisma.project.findFirst({ where: { id: projectId, workspaceId } });
-  if (!project) notFound();
+  const project = access.project;
 
   // Read snapshots via Prisma directly (server component) — same rows the proxy serves.
   const snapshots = await prisma.snapshot.findMany({

@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { ActivityPoller } from '@/components/review/activity-poller';
 
@@ -14,11 +14,10 @@ export default async function ReviewActivityPage({
   const { workspaceId, projectId } = await params;
   const filters = await searchParams;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER', 'VIEWER']);
   if (!access.ok) notFound();
 
-  const project = await prisma.project.findFirst({ where: { id: projectId, workspaceId } });
-  if (!project) notFound();
+  const project = access.project;
 
   // The feed reads straight from AuditEvent (Epic 8's log) — no separate feed store,
   // so it can't drift from the audit trail (Issue 4.8 AC).

@@ -1,5 +1,5 @@
 import { notFound } from 'next/navigation';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { GithubPublishingSettings } from '@/components/publish/github-publishing-settings';
 
@@ -10,11 +10,10 @@ export default async function GithubPublishingSettingsPage({
 }) {
   const { workspaceId, projectId } = await params;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN']);
   if (!access.ok) notFound();
 
-  const project = await prisma.project.findFirst({ where: { id: projectId, workspaceId } });
-  if (!project) notFound();
+  const project = access.project;
 
   const mapping = await prisma.publishMapping.findUnique({
     where: { projectId_tool: { projectId, tool: 'GITHUB' } },

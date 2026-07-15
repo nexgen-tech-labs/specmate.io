@@ -21,6 +21,45 @@ enum Role {
   VIEWER
 }
 
+// Organization-level roles (Issue 12.11): OWNER owns billing/org settings and can
+// create/delete Workspaces; ADMIN manages Workspaces and Teams but not billing.
+// Both cascade to an effective Workspace ADMIN in every workspace of the org.
+enum OrgRole {
+  OWNER
+  ADMIN
+}
+
+// Top of the tenancy hierarchy (Issue 12.10): Organization → Workspace → Team →
+// User. One per paying customer company. Introduced additively — Workspace keeps
+// its existing semantics (and, for now, its Stripe billing fields from Issue
+// 10.9; consolidating billing at the org level is a decision deferred until real
+// pricing lands). Existing workspaces were backfilled into implicit
+// single-workspace organizations (see migration add_org_team_hierarchy).
+model Organization {
+  id        String    @id @default(cuid())
+  name      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  members    OrganizationMember[]
+  workspaces Workspace[]
+}
+
+model OrganizationMember {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  role           OrgRole
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@unique([organizationId, userId])
+}
+
 enum SourceKind {
   DOCX
   PDF
@@ -97,6 +136,12 @@ enum SubscriptionStatus {
 model Workspace {
   id             String    @id @default(cuid())
   name           String
+  // Nullable by design (Issue 12.10): all real workspaces have an organization
+  // (backfilled implicit single-workspace orgs for pre-hierarchy data; signup
+  // always creates one), but the column stays nullable so a workspace with no
+  // org is simply "no org-level grants" (deny-by-default) rather than a broken
+  // row — and existing test fixtures keep working unchanged.
+  organizationId String?
   // Manually-set placeholder for the workspace's subscription revenue, used only to
   // compute an AI cost-to-revenue ratio (Issue #1.6). Superseded by real subscription
   // data (subscriptionBaseUsd) once Stripe billing is live for a workspace (Issue
@@ -127,7 +172,9 @@ model Workspace {
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
 
+  organization              Organization?             @relation(fields: [organizationId], references: [id])
   members                   WorkspaceMember[]
+  teams                     Team[]
   projects                  Project[]
   auditEvents               AuditEvent[]
   invites                   WorkspaceInvite[]
@@ -198,6 +245,8 @@ model User {
   updatedAt    DateTime @updatedAt
 
   memberships      WorkspaceMember[]
+  orgMemberships   OrganizationMember[]
+  teamMemberships  TeamMember[]
   reviewDecisions  ReviewDecision[]
   auditEvents      AuditEvent[]
   sentInvites      WorkspaceInvite[]
@@ -217,6 +266,53 @@ model WorkspaceMember {
   @@unique([workspaceId, userId])
 }
 
+// Team (Issue 12.10/12.11): a grouping of users within a Workspace, used for
+// permission scoping. Semantics — team scoping is a *restriction*, not a grant:
+// workspace membership grants access as before, but a non-admin member who
+// belongs to at least one project-scoped team (a team with TeamProject rows)
+// has their visibility narrowed to the union of their scoped teams' projects.
+// Teams with no TeamProject rows are plain groupings and never restrict.
+// Workspace ADMINs and org-level OWNER/ADMINs are never restricted by team
+// scope (they need whole-workspace visibility to administer it).
+model Team {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id])
+  members   TeamMember[]
+  projects  TeamProject[]
+
+  @@unique([workspaceId, name])
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id])
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([teamId, userId])
+}
+
+model TeamProject {
+  id        String   @id @default(cuid())
+  teamId    String
+  projectId String
+  createdAt DateTime @default(now())
+
+  team    Team    @relation(fields: [teamId], references: [id])
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@unique([teamId, projectId])
+}
+
 model Project {
   id          String    @id @default(cuid())
   workspaceId String
@@ -233,6 +329,7 @@ model Project {
   generationRuns  GenerationRun[]
   publishMappings PublishMapping[]
   snapshots       Snapshot[]
+  teamScopes      TeamProject[]
 }
 
 model Source {

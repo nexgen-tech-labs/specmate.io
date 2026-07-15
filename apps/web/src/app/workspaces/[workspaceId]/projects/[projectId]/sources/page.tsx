@@ -1,5 +1,5 @@
 import { notFound } from 'next/navigation';
-import { requireWorkspaceRole } from '@/lib/workspace-context';
+import { requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { UploadZone } from '@/components/sources/upload-zone';
 import { SourceList, type SourceRow } from '@/components/sources/source-list';
@@ -11,11 +11,10 @@ export default async function ProjectSourcesPage({
 }) {
   const { workspaceId, projectId } = await params;
 
-  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
+  const access = await requireProjectRole(workspaceId, projectId, ['ADMIN', 'REVIEWER', 'VIEWER']);
   if (!access.ok) notFound();
 
-  const project = await prisma.project.findFirst({ where: { id: projectId, workspaceId } });
-  if (!project) notFound();
+  const project = access.project;
 
   const [sources, referenceItems] = await Promise.all([
     prisma.source.findMany({
