@@ -49,7 +49,7 @@ describe('OnboardingPage', () => {
     expect(screen.queryByLabelText(/workspace name/i)).toBeNull();
   });
 
-  it('completes signup end-to-end: account step, workspace step, signs in, redirects to the workspace dashboard', async () => {
+  it('completes signup end-to-end: account step, workspace step, signs in, reaches plan selection', async () => {
     render(<OnboardingPage />);
 
     fireEvent.change(screen.getByLabelText(/full name/i), { target: { value: 'Jane Doe' } });
@@ -61,7 +61,9 @@ describe('OnboardingPage', () => {
     fireEvent.change(workspaceInput, { target: { value: 'Acme Corp' } });
     fireEvent.click(screen.getByRole('button', { name: /create workspace/i }));
 
-    await waitFor(() => expect(push).toHaveBeenCalledWith('/workspaces/ws-1'));
+    // Issue 10.9: after workspace creation, the flow now lands on plan
+    // selection (Starter/Enterprise) before the dashboard, not a direct redirect.
+    await waitFor(() => expect(screen.getByText(/choose a plan/i)).toBeDefined());
 
     expect(global.fetch).toHaveBeenCalledWith(
       '/api/signup',
@@ -80,6 +82,54 @@ describe('OnboardingPage', () => {
       password: 'password123',
       redirect: false,
     });
+  });
+
+  it('skipping plan selection routes straight to the workspace dashboard', async () => {
+    render(<OnboardingPage />);
+
+    fireEvent.change(screen.getByLabelText(/full name/i), { target: { value: 'Jane Doe' } });
+    fireEvent.change(screen.getByLabelText(/work email/i), { target: { value: 'jane@acme.com' } });
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: 'password123' } });
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
+
+    fireEvent.change(screen.getByLabelText(/workspace name/i), { target: { value: 'Acme Corp' } });
+    fireEvent.click(screen.getByRole('button', { name: /create workspace/i }));
+
+    await waitFor(() => expect(screen.getByText(/choose a plan/i)).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: /skip for now/i }));
+
+    expect(push).toHaveBeenCalledWith('/workspaces/ws-1');
+  });
+
+  it('choosing Enterprise sets the tier and routes to the workspace dashboard without Stripe', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === '/api/signup') {
+        return { ok: true, json: async () => ({ ok: true, workspaceId: 'ws-1' }) };
+      }
+      if (typeof url === 'string' && url.includes('/billing/tier')) {
+        return { ok: true, json: async () => ({ ok: true, tier: 'ENTERPRISE' }) };
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<OnboardingPage />);
+    fireEvent.change(screen.getByLabelText(/full name/i), { target: { value: 'Jane Doe' } });
+    fireEvent.change(screen.getByLabelText(/work email/i), { target: { value: 'jane@acme.com' } });
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: 'password123' } });
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
+
+    fireEvent.change(screen.getByLabelText(/workspace name/i), { target: { value: 'Acme Corp' } });
+    fireEvent.click(screen.getByRole('button', { name: /create workspace/i }));
+
+    await waitFor(() => expect(screen.getByText(/choose a plan/i)).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: /contact sales/i }));
+
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/workspaces/ws-1'));
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/workspaces/ws-1/billing/tier',
+      expect.objectContaining({ method: 'POST' }),
+    );
   });
 
   it('shows an error if the signup API call fails', async () => {

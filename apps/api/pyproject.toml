@@ -20,6 +20,7 @@ dependencies = [
     # PDF rendering for snapshot exports + approval reports (Issues 8.4/8.5).
     # Was already a dev-group dep (test fixtures) — promoted, not newly introduced.
     "reportlab>=4.2.5",
+    "stripe>=15.3.0",
 ]
 
 [dependency-groups]

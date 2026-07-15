@@ -4,7 +4,8 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { signIn } from 'next-auth/react';
 
-type Step = 'account' | 'workspace';
+type Step = 'account' | 'workspace' | 'plan';
+type Tier = 'STARTER' | 'ENTERPRISE';
 
 export function OnboardingForm() {
   const router = useRouter();
@@ -13,6 +14,7 @@ export function OnboardingForm() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [workspaceName, setWorkspaceName] = useState('');
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -103,7 +105,7 @@ export function OnboardingForm() {
               setSubmitting(false);
               return;
             }
-            const { workspaceId }: { workspaceId: string } = await res.json();
+            const { workspaceId: newWorkspaceId }: { workspaceId: string } = await res.json();
 
             const result = await signIn('credentials', { email, password, redirect: false });
             if (result?.error) {
@@ -112,9 +114,9 @@ export function OnboardingForm() {
               return;
             }
 
-            // Straight into the workspace dashboard (Issue 10.10) — a brand-new
-            // workspace's empty state is itself the entry point to the guided wizard.
-            router.push(`/workspaces/${workspaceId}`);
+            setWorkspaceId(newWorkspaceId);
+            setSubmitting(false);
+            setStep('plan');
           } catch {
             setError('Something went wrong. Please try again.');
             setSubmitting(false);
@@ -160,5 +162,92 @@ export function OnboardingForm() {
     );
   }
 
-  return null;
+  // step === 'plan' — Issue 10.9: pick a self-serve (Starter, Stripe Checkout)
+  // or sales-assisted (Enterprise) tier before landing in the dashboard.
+  return (
+    <PlanSelection
+      submitting={submitting}
+      error={error}
+      onSelect={async (tier: Tier) => {
+        setError(null);
+        setSubmitting(true);
+        if (tier === 'ENTERPRISE') {
+          await fetch(`/api/workspaces/${workspaceId}/billing/tier`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tier: 'ENTERPRISE' }),
+          });
+          router.push(`/workspaces/${workspaceId}`);
+          return;
+        }
+        const res = await fetch(`/api/workspaces/${workspaceId}/billing/checkout`, {
+          method: 'POST',
+        });
+        if (!res.ok) {
+          const body: { error?: string } = await res.json().catch(() => ({}));
+          setError(body.error ?? 'Could not start checkout.');
+          setSubmitting(false);
+          return;
+        }
+        const { url }: { url: string } = await res.json();
+        window.location.href = url;
+      }}
+      onSkip={() => router.push(`/workspaces/${workspaceId}`)}
+    />
+  );
+}
+
+function PlanSelection({
+  submitting,
+  error,
+  onSelect,
+  onSkip,
+}: {
+  submitting: boolean;
+  error: string | null;
+  onSelect: (tier: Tier) => void;
+  onSkip: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-line bg-panel p-8">
+      <div className="mb-4 font-mono text-sm text-sub">CHOOSE A PLAN</div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <button
+          type="button"
+          disabled={submitting}
+          onClick={() => onSelect('STARTER')}
+          className="rounded-lg border border-line bg-paper p-5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-cobalt disabled:opacity-50"
+        >
+          <div className="text-lg font-bold text-ink">Starter</div>
+          <p className="mt-1 text-sm text-sub">
+            Self-serve. Base subscription + usage-based pricing per published item.
+          </p>
+          <div className="mt-3 text-sm font-semibold text-cobalt">Start free trial →</div>
+        </button>
+        <button
+          type="button"
+          disabled={submitting}
+          onClick={() => onSelect('ENTERPRISE')}
+          className="rounded-lg border border-line bg-paper p-5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-cobalt disabled:opacity-50"
+        >
+          <div className="text-lg font-bold text-ink">Enterprise</div>
+          <p className="mt-1 text-sm text-sub">
+            Custom pricing, sales-assisted onboarding, for larger orgs and pilots.
+          </p>
+          <div className="mt-3 text-sm font-semibold text-cobalt">Contact sales →</div>
+        </button>
+      </div>
+
+      {error ? <p className="mt-3 text-sm text-red">{error}</p> : null}
+
+      <button
+        type="button"
+        disabled={submitting}
+        onClick={onSkip}
+        className="mt-5 text-sm text-sub underline-offset-2 hover:underline"
+      >
+        Skip for now, decide later
+      </button>
+    </div>
+  );
 }

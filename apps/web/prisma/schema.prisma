@@ -80,12 +80,27 @@ enum InviteStatus {
   REVOKED
 }
 
+enum PricingTier {
+  STARTER
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  NONE // no Stripe subscription yet (e.g. ENTERPRISE, sales-assisted, not self-serve billed)
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+}
+
 model Workspace {
   id             String    @id @default(cuid())
   name           String
   // Manually-set placeholder for the workspace's subscription revenue, used only to
-  // compute an AI cost-to-revenue ratio (Issue #1.6). No real billing system yet —
-  // set directly in the DB, no self-serve UI.
+  // compute an AI cost-to-revenue ratio (Issue #1.6). Superseded by real subscription
+  // data (subscriptionBaseUsd) once Stripe billing is live for a workspace (Issue
+  // 10.9) — kept as a fallback for ENTERPRISE workspaces billed outside Stripe.
   planRevenueUsd Decimal?  @db.Decimal(10, 2)
   // Duplicate-detection sensitivity (Issue 3.5), 0..1; null -> env default.
   duplicateThreshold Float?
@@ -95,16 +110,54 @@ model Workspace {
   // this workspace's first generation run completes. createdAt is the signup moment,
   // so (firstGenerationAt - createdAt) is the workspace's actual time-to-first-value.
   firstGenerationAt DateTime?
+
+  // Pricing & billing (Issue 10.9). STARTER is self-serve, billed via Stripe
+  // (subscriptionBaseUsd + metered per-published-item overage — see UsagePeriod).
+  // ENTERPRISE is sales-assisted, custom pricing, not necessarily billed through
+  // Stripe (falls back to planRevenueUsd for cost-to-revenue tracking).
+  pricingTier            PricingTier        @default(STARTER)
+  subscriptionStatus     SubscriptionStatus @default(NONE)
+  stripeCustomerId       String?            @unique
+  stripeSubscriptionId   String?            @unique
+  // Real base subscription price once a Stripe subscription is active — read from
+  // the Stripe subscription object, not hand-entered like planRevenueUsd.
+  subscriptionBaseUsd    Decimal?           @db.Decimal(10, 2)
+
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
 
-  members     WorkspaceMember[]
-  projects    Project[]
-  auditEvents AuditEvent[]
-  invites     WorkspaceInvite[]
-  aiCallLogs  AiCallLog[]
-  snapshots   Snapshot[]
+  members      WorkspaceMember[]
+  projects     Project[]
+  auditEvents  AuditEvent[]
+  invites      WorkspaceInvite[]
+  aiCallLogs   AiCallLog[]
+  snapshots    Snapshot[]
+  usagePeriods UsagePeriod[]
+}
+
+// One row per workspace per billing period (calendar month, UTC) — the metered
+// usage component of Issue 10.9's hybrid pricing (base subscription + per-item
+// overage). `publishedItemCount` is computed by counting PublishedItem rows
+// created in [periodStart, periodEnd); `reportedToStripeAt` is set once that
+// count has been pushed to Stripe as a usage record (idempotent — never
+// double-reported for the same period).
+model UsagePeriod {
+  id                 String    @id @default(cuid())
+  workspaceId        String
+  periodStart        DateTime
+  periodEnd          DateTime
+  publishedItemCount Int       @default(0)
+  // How much of publishedItemCount has been pushed to Stripe so far — meter
+  // events are additive, so only the delta since the last report is ever sent.
+  reportedCount      Int       @default(0)
+  reportedToStripeAt DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+
+  @@unique([workspaceId, periodStart])
 }
 
 model User {

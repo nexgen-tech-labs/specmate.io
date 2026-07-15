@@ -92,6 +92,20 @@ class PublishTarget(str, enum.Enum):
     GITHUB = "GITHUB"
 
 
+class PricingTier(str, enum.Enum):
+    STARTER = "STARTER"
+    ENTERPRISE = "ENTERPRISE"
+
+
+class SubscriptionStatus(str, enum.Enum):
+    NONE = "NONE"
+    TRIALING = "TRIALING"
+    ACTIVE = "ACTIVE"
+    PAST_DUE = "PAST_DUE"
+    CANCELED = "CANCELED"
+    INCOMPLETE = "INCOMPLETE"
+
+
 class Workspace(Base):
     __tablename__ = "Workspace"
 
@@ -100,6 +114,16 @@ class Workspace(Base):
     duplicateThreshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     approvalStages: Mapped[int] = mapped_column(Integer, default=1)
     firstGenerationAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    pricingTier: Mapped[PricingTier] = mapped_column(
+        Enum(PricingTier, name="PricingTier", create_type=False), default=PricingTier.STARTER
+    )
+    subscriptionStatus: Mapped[SubscriptionStatus] = mapped_column(
+        Enum(SubscriptionStatus, name="SubscriptionStatus", create_type=False),
+        default=SubscriptionStatus.NONE,
+    )
+    stripeCustomerId: Mapped[str | None] = mapped_column(String, nullable=True)
+    stripeSubscriptionId: Mapped[str | None] = mapped_column(String, nullable=True)
+    subscriptionBaseUsd: Mapped[float | None] = mapped_column(Float, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -277,6 +301,26 @@ class Snapshot(Base):
     kind: Mapped[str] = mapped_column(String, default="TRACE_MAP")
     data: Mapped[dict[str, object]] = mapped_column(JSONB)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
+
+
+class UsagePeriod(Base):
+    """One row per workspace per billing period (Issue 10.9) — the metered
+    component of the hybrid pricing model. publishedItemCount is computed by
+    metering.py; reportedCount is how much of that has been pushed to Stripe so
+    far (Stripe meter events are additive, so only the delta is ever reported);
+    reportedToStripeAt is the last time a report succeeded."""
+
+    __tablename__ = "UsagePeriod"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    periodStart: Mapped[datetime] = mapped_column(DateTime)
+    periodEnd: Mapped[datetime] = mapped_column(DateTime)
+    publishedItemCount: Mapped[int] = mapped_column(Integer, default=0)
+    reportedCount: Mapped[int] = mapped_column(Integer, default=0)
+    reportedToStripeAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
 
 class TraceLink(Base):

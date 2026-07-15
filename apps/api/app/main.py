@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from app.routers import (
     ai_demo,
+    billing,
     connectors,
     generation,
     health,
@@ -23,3 +24,4 @@ app.include_router(publish.router)
 app.include_router(publish_ado.router)
 app.include_router(publish_github.router)
 app.include_router(reports.router)
+app.include_router(billing.router)
