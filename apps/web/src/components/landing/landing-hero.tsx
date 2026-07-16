@@ -3,11 +3,11 @@ import { Eyebrow } from './demo-ui';
 
 interface LandingHeroProps {
   playing: boolean;
-  onReset: () => void;
   onRunDemo: () => void;
+  onSignIn: () => void;
 }
 
-export function LandingHero({ playing, onReset, onRunDemo }: LandingHeroProps) {
+export function LandingHero({ playing, onRunDemo, onSignIn }: LandingHeroProps) {
   return (
     <>
       <header className="border-b border-line bg-panel">
@@ -20,15 +20,6 @@ export function LandingHero({ playing, onReset, onRunDemo }: LandingHeroProps) {
           </div>
           <div className="flex gap-3">
             <button
-              onClick={onReset}
-              disabled={playing}
-              className={`rounded-md border border-line bg-transparent px-4 py-2.5 font-mono text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-cobalt ${
-                playing ? 'text-line' : 'text-ink'
-              }`}
-            >
-              Reset
-            </button>
-            <button
               onClick={onRunDemo}
               disabled={playing}
               className={`rounded-md border-none px-5 py-2.5 font-mono text-sm font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cobalt ${
@@ -36,6 +27,12 @@ export function LandingHero({ playing, onReset, onRunDemo }: LandingHeroProps) {
               }`}
             >
               {playing ? 'Running…' : '▶ Run end-to-end demo'}
+            </button>
+            <button
+              onClick={onSignIn}
+              className="rounded-md border border-line bg-transparent px-4 py-2.5 font-mono text-sm text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-cobalt"
+            >
+              Sign In
             </button>
             <Link
               href="/onboarding"

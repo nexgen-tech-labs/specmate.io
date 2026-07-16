@@ -1,6 +1,11 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { LandingPage } from './landing-page';
+
+vi.mock('next-auth/react', () => ({ signIn: vi.fn() }));
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
+}));
 
 describe('LandingPage', () => {
   it('renders the hero headline', () => {
@@ -22,5 +27,44 @@ describe('LandingPage', () => {
     expect(screen.getByText('Human review')).toBeDefined();
     expect(screen.getByText('Publish to tools')).toBeDefined();
     expect(screen.getByText('Audit & sync')).toBeDefined();
+  });
+
+  it('does not render a Reset button', () => {
+    render(<LandingPage />);
+    expect(screen.queryByRole('button', { name: /^reset$/i })).toBeNull();
+  });
+
+  it('renders footer legal placeholder links', () => {
+    render(<LandingPage />);
+    expect(screen.getByText('Terms & Conditions')).toBeDefined();
+    expect(screen.getByText('Privacy Policy')).toBeDefined();
+  });
+
+  it('opens the Sign In modal with OAuth options and a back-to-home action', () => {
+    render(<LandingPage />);
+    fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+
+    expect(screen.getByText('Sign in to your workspace')).toBeDefined();
+    expect(screen.getByText('Continue with Google')).toBeDefined();
+    expect(screen.getByText('Continue with Microsoft')).toBeDefined();
+    expect(screen.getByText('Continue with GitHub')).toBeDefined();
+    expect(screen.getByText('Continue with Jira')).toBeDefined();
+    expect(screen.getByRole('button', { name: /back to home/i })).toBeDefined();
+  });
+
+  it('toggles the Sign In modal to create-account framing', () => {
+    render(<LandingPage />);
+    fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+    fireEvent.click(screen.getByText('Get started'));
+
+    expect(screen.getByText('Create your workspace')).toBeDefined();
+  });
+
+  it('closes the Sign In modal via Back to Home', () => {
+    render(<LandingPage />);
+    fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /back to home/i }));
+
+    expect(screen.queryByText('Sign in to your workspace')).toBeNull();
   });
 });
