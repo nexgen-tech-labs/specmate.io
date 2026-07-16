@@ -111,6 +111,61 @@ resource sourcesContainer 'Microsoft.Storage/storageAccounts/blobServices/contai
   }
 }
 
+// Secret name -> Key Vault secret name, for apps/web (matches apps/web/.env.example).
+// Values live in Key Vault only; this just maps container-app secret names to them.
+var webKeyVaultSecrets = [
+  { secretRef: 'database-url', kvSecretName: 'DATABASE-URL-WEB' }
+  { secretRef: 'nextauth-secret', kvSecretName: 'NEXTAUTH-SECRET' }
+  { secretRef: 'azure-storage-connection-string', kvSecretName: 'AZURE-STORAGE-CONNECTION-STRING' }
+  { secretRef: 'stripe-secret-key', kvSecretName: 'STRIPE-SECRET-KEY' }
+  { secretRef: 'stripe-webhook-secret', kvSecretName: 'STRIPE-WEBHOOK-SECRET' }
+  { secretRef: 'stripe-starter-price-id', kvSecretName: 'STRIPE-STARTER-PRICE-ID' }
+  { secretRef: 'stripe-starter-overage-price-id', kvSecretName: 'STRIPE-STARTER-OVERAGE-PRICE-ID' }
+  { secretRef: 'atlassian-connect-app-key', kvSecretName: 'ATLASSIAN-CONNECT-APP-KEY' }
+]
+
+// Same, for apps/api (matches apps/api/.env.example).
+var apiKeyVaultSecrets = [
+  { secretRef: 'database-url', kvSecretName: 'DATABASE-URL-API' }
+  { secretRef: 'anthropic-api-key', kvSecretName: 'ANTHROPIC-API-KEY' }
+  { secretRef: 'azure-storage-connection-string', kvSecretName: 'AZURE-STORAGE-CONNECTION-STRING' }
+  { secretRef: 'atlassian-email', kvSecretName: 'ATLASSIAN-EMAIL' }
+  { secretRef: 'atlassian-api-token', kvSecretName: 'ATLASSIAN-API-TOKEN' }
+  { secretRef: 'jira-base-url', kvSecretName: 'JIRA-BASE-URL' }
+  { secretRef: 'confluence-base-url', kvSecretName: 'CONFLUENCE-BASE-URL' }
+  { secretRef: 'ado-org-url', kvSecretName: 'ADO-ORG-URL' }
+  { secretRef: 'ado-pat', kvSecretName: 'ADO-PAT' }
+  { secretRef: 'azure-ad-client-id', kvSecretName: 'AZURE-AD-CLIENT-ID' }
+  { secretRef: 'azure-ad-client-secret', kvSecretName: 'AZURE-AD-CLIENT-SECRET' }
+  { secretRef: 'azure-ad-tenant-id', kvSecretName: 'AZURE-AD-TENANT-ID' }
+  { secretRef: 'github-token', kvSecretName: 'GITHUB-TOKEN' }
+  { secretRef: 'slack-bot-token', kvSecretName: 'SLACK-BOT-TOKEN' }
+  { secretRef: 'stripe-secret-key', kvSecretName: 'STRIPE-SECRET-KEY' }
+]
+
+// Precomputed env-var arrays (secretRef-backed) — kept as separate vars because
+// Bicep for-expressions can't be nested inside concat() inline in a resource body.
+var webSecretEnvVars = [
+  for s in webKeyVaultSecrets: {
+    name: toUpper(replace(s.secretRef, '-', '_'))
+    secretRef: s.secretRef
+  }
+]
+var webStaticEnvVars = [
+  { name: 'AZURE_STORAGE_CONTAINER', value: 'sources' }
+]
+var apiSecretEnvVars = [
+  for s in apiKeyVaultSecrets: {
+    name: toUpper(replace(s.secretRef, '-', '_'))
+    secretRef: s.secretRef
+  }
+]
+var apiStaticEnvVars = [
+  { name: 'ENVIRONMENT', value: environmentName }
+  { name: 'AZURE_STORAGE_CONTAINER', value: 'sources' }
+  { name: 'STRIPE_USAGE_EVENT_NAME', value: 'published_item' }
+]
+
 resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${resourceName}-web'
   location: location
@@ -133,6 +188,13 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
           identity: containerAppIdentity.id
         }
       ]
+      secrets: [
+        for s in webKeyVaultSecrets: {
+          name: s.secretRef
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/${s.kvSecretName}'
+          identity: containerAppIdentity.id
+        }
+      ]
     }
     template: {
       containers: [
@@ -140,6 +202,14 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'web'
           image: '${acr.properties.loginServer}/specmate-web:latest'
           resources: { cpu: json('0.5'), memory: '1Gi' }
+          env: concat(
+            [
+              { name: 'NEXTAUTH_URL', value: 'https://${resourceName}-web.${containerAppsEnv.properties.defaultDomain}' }
+              { name: 'API_BASE_URL', value: 'https://${resourceName}-api.internal.${containerAppsEnv.properties.defaultDomain}' }
+            ],
+            webStaticEnvVars,
+            webSecretEnvVars
+          )
         }
       ]
       scale: { minReplicas: 0, maxReplicas: 3 }
@@ -169,6 +239,13 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
           identity: containerAppIdentity.id
         }
       ]
+      secrets: [
+        for s in apiKeyVaultSecrets: {
+          name: s.secretRef
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/${s.kvSecretName}'
+          identity: containerAppIdentity.id
+        }
+      ]
     }
     template: {
       containers: [
@@ -176,6 +253,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'api'
           image: '${acr.properties.loginServer}/specmate-api:latest'
           resources: { cpu: json('0.5'), memory: '1Gi' }
+          env: concat(apiStaticEnvVars, apiSecretEnvVars)
         }
       ]
       scale: { minReplicas: 0, maxReplicas: 3 }
