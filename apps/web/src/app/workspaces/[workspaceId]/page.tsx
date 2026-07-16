@@ -47,12 +47,20 @@ export default async function WorkspaceDashboardPage({
             <p className="mt-2 text-base text-sub">Your projects</p>
           </div>
           {access.membership.role === 'ADMIN' ? (
-            <Link
-              href={`/workspaces/${workspaceId}/invite`}
-              className="text-sm text-cobalt underline-offset-2 hover:underline"
-            >
-              Invite teammate →
-            </Link>
+            <div className="flex flex-col items-end gap-1">
+              <Link
+                href={`/workspaces/${workspaceId}/invite`}
+                className="text-sm text-cobalt underline-offset-2 hover:underline"
+              >
+                Invite teammate →
+              </Link>
+              <Link
+                href={`/workspaces/${workspaceId}/billing`}
+                className="text-sm text-cobalt underline-offset-2 hover:underline"
+              >
+                Billing →
+              </Link>
+            </div>
           ) : null}
         </div>
 

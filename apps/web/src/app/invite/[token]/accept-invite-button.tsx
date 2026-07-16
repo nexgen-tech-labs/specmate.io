@@ -4,6 +4,7 @@ import { useState } from 'react';
 
 export function AcceptInviteButton({ token }: { token: string }) {
   const [error, setError] = useState<string | null>(null);
+  const [billingRequired, setBillingRequired] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [accepted, setAccepted] = useState(false);
 
@@ -17,10 +18,12 @@ export function AcceptInviteButton({ token }: { token: string }) {
         onClick={async () => {
           setSubmitting(true);
           setError(null);
+          setBillingRequired(false);
           const res = await fetch(`/api/invites/${token}/accept`, { method: 'POST' });
           if (!res.ok) {
-            const body: { error?: string } = await res.json();
+            const body: { error?: string; code?: string } = await res.json();
             setError(body.error ?? 'Could not accept this invite.');
+            setBillingRequired(body.code === 'BILLING_REQUIRED');
             setSubmitting(false);
             return;
           }
@@ -31,7 +34,14 @@ export function AcceptInviteButton({ token }: { token: string }) {
       >
         {submitting ? 'Joining…' : 'Accept invite →'}
       </button>
-      {error ? <p className="mt-3 text-sm text-red">{error}</p> : null}
+      {error ? (
+        <p className="mt-3 text-sm text-red">
+          {error}
+          {billingRequired
+            ? ' Ask the workspace admin to add a payment method, then try again.'
+            : ''}
+        </p>
+      ) : null}
     </div>
   );
 }

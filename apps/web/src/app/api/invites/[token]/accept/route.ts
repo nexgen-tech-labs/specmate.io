@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { checkSeatGate } from '@/lib/billing-gate';
 
 export async function POST(_request: Request, { params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
@@ -21,6 +22,14 @@ export async function POST(_request: Request, { params }: { params: Promise<{ to
       { error: 'This invite was sent to a different email address.' },
       { status: 403 },
     );
+  }
+
+  // Free-while-solo billing gate (Issue 10.9 amendment): accepting is the actual
+  // moment a workspace becomes multi-user — enforced here, not at invite
+  // creation (an admin can freely send invites that never get accepted).
+  const seatGate = await checkSeatGate(invite.workspaceId, userId);
+  if (!seatGate.allowed) {
+    return NextResponse.json({ error: seatGate.reason, code: 'BILLING_REQUIRED' }, { status: 402 });
   }
 
   await prisma.$transaction([
