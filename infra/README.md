@@ -4,17 +4,23 @@ Bicep templates defining SpecMate's Azure footprint: Container Apps (web + api),
 
 **Nothing here is deployed automatically.** These files are scaffolding only — run deployments interactively so you can review cost/impact before anything is provisioned.
 
+## Current live deployment
+
+**Single environment only** — `environmentName=production` deployed to `rg-specmate-prod` (`centralus`; moved from `eastus` due to a Postgres capacity/quota restriction on this subscription). A separate `staging` environment was deliberately deferred — decide and deploy later if actually needed; until then, `deploy.yml` builds once and deploys straight to production behind the `production` GitHub Environment's manual-approval gate, with no intermediate staging deploy.
+
 ## First-time setup (run manually, with the user present)
 
 ```bash
 az login
-az group create --name specmate-staging-rg --location <region>
+az group create --name rg-specmate-prod --location <region-with-postgres-capacity>
 
 az deployment group create \
-  --resource-group specmate-staging-rg \
+  --resource-group rg-specmate-prod \
   --template-file infra/main.bicep \
-  --parameters environmentName=staging postgresAdminLogin=<login> postgresAdminPassword=<generate-a-strong-password>
+  --parameters environmentName=production postgresAdminLogin=<login> postgresAdminPassword=<generate-a-strong-password>
 ```
+
+If Postgres Flexible Server provisioning fails with `LocationIsOfferRestricted`, check `az postgres flexible-server list-skus --location <region>` for alternate regions the subscription actually allows before retrying.
 
 ## Federated credentials for GitHub Actions (OIDC, no client secret)
 
