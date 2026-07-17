@@ -111,6 +111,14 @@ class OrgRole(str, enum.Enum):
     ADMIN = "ADMIN"
 
 
+class OrgSize(str, enum.Enum):
+    SOLO = "SOLO"
+    SMALL = "SMALL"
+    MEDIUM = "MEDIUM"
+    LARGE = "LARGE"
+    ENTERPRISE = "ENTERPRISE"
+
+
 class Organization(Base):
     """Top of the tenancy hierarchy (Issue 12.10): Organization → Workspace →
     Team → User. apps/api only mirrors these for schema completeness — all
@@ -121,6 +129,9 @@ class Organization(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     name: Mapped[str] = mapped_column(String)
+    size: Mapped[OrgSize | None] = mapped_column(
+        Enum(OrgSize, name="OrgSize", create_type=False), nullable=True
+    )
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

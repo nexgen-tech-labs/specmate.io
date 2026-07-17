@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { UploadZone } from '@/components/sources/upload-zone';
 
-type StepKey = 'connect' | 'upload' | 'generate';
+type StepKey = 'connect' | 'upload' | 'generate' | 'done';
 
 const STEPS: Array<{ key: StepKey; label: string }> = [
   { key: 'connect', label: 'Connect a tool' },
@@ -24,11 +24,13 @@ interface SourceStatus {
 export function OnboardingWizard({
   workspaceId,
   projectId,
+  projectName,
   hasConnectedTool,
   hasSource,
 }: {
   workspaceId: string;
   projectId: string;
+  projectName: string;
   hasConnectedTool: boolean;
   hasSource: boolean;
 }) {
@@ -38,6 +40,7 @@ export function OnboardingWizard({
   const [parseStatus, setParseStatus] = useState<string | null>(hasSource ? 'PARSED' : null);
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
+  const [itemCount, setItemCount] = useState<number | null>(null);
   const [step, setStep] = useState<StepKey>(connected || hasSource ? 'upload' : 'connect');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -72,40 +75,45 @@ export function OnboardingWizard({
       setGenerateError(payload.detail ?? payload.error ?? 'Generation failed.');
       return;
     }
-    router.push(`/workspaces/${workspaceId}/projects/${projectId}/review`);
+    const payload = (await res.json()) as { stats?: { item_count?: number } | null };
+    setItemCount(payload.stats?.item_count ?? null);
+    setStep('done');
   }
 
   const canGenerate = parseStatus === 'PARSED';
 
   return (
     <div className="mt-8">
-      {/* Step indicator (10.10 AC) */}
-      <ol className="mb-8 flex items-center gap-2 text-xs">
-        {STEPS.map((s, i) => {
-          const done =
-            (s.key === 'connect' && connected) ||
-            (s.key === 'upload' && parseStatus !== null) ||
-            (s.key === 'generate' && false);
-          const active = step === s.key;
-          return (
-            <li key={s.key} className="flex items-center gap-2">
-              <span
-                className={`flex h-6 w-6 items-center justify-center rounded-full font-mono font-bold ${
-                  done
-                    ? 'bg-green text-white'
-                    : active
-                      ? 'bg-cobalt text-white'
-                      : 'bg-line text-sub'
-                }`}
-              >
-                {done ? '✓' : i + 1}
-              </span>
-              <span className={active ? 'font-semibold text-ink' : 'text-sub'}>{s.label}</span>
-              {i < STEPS.length - 1 ? <span className="mx-1 text-sub">→</span> : null}
-            </li>
-          );
-        })}
-      </ol>
+      {/* Step indicator (10.10 AC) — hidden on the terminal "done" screen, which
+          is a standalone confirmation card, not part of the 3-step sequence. */}
+      {step !== 'done' ? (
+        <ol className="mb-8 flex items-center gap-2 text-xs">
+          {STEPS.map((s, i) => {
+            const done =
+              (s.key === 'connect' && connected) ||
+              (s.key === 'upload' && parseStatus !== null) ||
+              (s.key === 'generate' && false);
+            const active = step === s.key;
+            return (
+              <li key={s.key} className="flex items-center gap-2">
+                <span
+                  className={`flex h-6 w-6 items-center justify-center rounded-full font-mono font-bold ${
+                    done
+                      ? 'bg-green text-white'
+                      : active
+                        ? 'bg-cobalt text-white'
+                        : 'bg-line text-sub'
+                  }`}
+                >
+                  {done ? '✓' : i + 1}
+                </span>
+                <span className={active ? 'font-semibold text-ink' : 'text-sub'}>{s.label}</span>
+                {i < STEPS.length - 1 ? <span className="mx-1 text-sub">→</span> : null}
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
 
       {step === 'connect' ? (
         <div className="rounded-lg border border-line bg-panel p-8">
@@ -230,6 +238,28 @@ export function OnboardingWizard({
               ← Back
             </button>
           </div>
+        </div>
+      ) : null}
+
+      {step === 'done' ? (
+        <div className="mx-auto max-w-md rounded-xl border border-line bg-panel p-10 text-center">
+          <div className="mx-auto mb-4.5 grid size-11 place-items-center rounded-full bg-green-soft text-xl text-green">
+            ✓
+          </div>
+          <h2 className="text-xl font-bold text-ink">
+            {itemCount ?? 0} item{itemCount === 1 ? '' : 's'} drafted
+          </h2>
+          <p className="mt-2.5 mb-6.5 text-sm leading-relaxed text-sub">
+            Epics, stories, and tasks generated from <strong>{projectName}</strong>&apos;s source,
+            quality-scored and ready for your review.
+          </p>
+          <button
+            type="button"
+            onClick={() => router.push(`/workspaces/${workspaceId}/projects/${projectId}/review`)}
+            className="w-full rounded-md bg-cobalt px-5 py-3.5 text-sm font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cobalt"
+          >
+            Go to Review →
+          </button>
         </div>
       ) : null}
     </div>

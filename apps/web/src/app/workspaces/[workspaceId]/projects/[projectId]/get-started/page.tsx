@@ -36,6 +36,7 @@ export default async function GetStartedPage({
         <OnboardingWizard
           workspaceId={workspaceId}
           projectId={projectId}
+          projectName={project.name}
           hasConnectedTool={mappingCount > 0}
           hasSource={sourceCount > 0}
         />

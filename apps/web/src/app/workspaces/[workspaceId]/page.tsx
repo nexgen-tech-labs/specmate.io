@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { getAccessibleProjectIds, requireWorkspaceRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { NewProjectForm } from '@/components/workspace/new-project-form';
+import { orgSizeLabel } from '@/lib/org-size';
 
 // Workspace dashboard (Issue 10.10) — the landing page after signup/login.
 // A brand-new workspace has zero projects; that empty state is itself the
@@ -18,8 +19,17 @@ export default async function WorkspaceDashboardPage({
   const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
   if (!access.ok) notFound();
 
-  const workspace = await prisma.workspace.findUnique({ where: { id: workspaceId } });
+  const workspace = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    include: { organization: { select: { name: true, size: true } } },
+  });
   if (!workspace) notFound();
+
+  const orgBreadcrumb = workspace.organization
+    ? [workspace.organization.name, orgSizeLabel(workspace.organization.size)]
+        .filter(Boolean)
+        .join(' / ')
+    : null;
 
   // Team scoping (Issue 12.11): a project-scoped member's dashboard only lists
   // the projects their teams are scoped to; null = unrestricted.
@@ -43,6 +53,9 @@ export default async function WorkspaceDashboardPage({
       <div className="mx-auto max-w-2xl">
         <div className="mb-8 flex items-end justify-between">
           <div>
+            {orgBreadcrumb ? (
+              <div className="mb-1.5 font-mono text-xs text-sub">{orgBreadcrumb}</div>
+            ) : null}
             <h1 className="text-3xl font-bold tracking-tight text-ink">{workspace.name}</h1>
             <p className="mt-2 text-base text-sub">Your projects</p>
           </div>
