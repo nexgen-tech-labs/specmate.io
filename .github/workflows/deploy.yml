@@ -22,6 +22,7 @@ env:
   ACR_NAME: ${{ vars.ACR_NAME }}
   RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
   CONTAINERAPPS_ENV: ${{ vars.CONTAINERAPPS_ENVIRONMENT }}
+  KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
 
 jobs:
   build-and-push:
@@ -62,12 +63,37 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
       - name: Azure login (OIDC federated credential)
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install web dependencies
+        run: pnpm install --frozen-lockfile --filter=@specmate/web...
+
+      # Schema before code: migrate the real production database ahead of
+      # swapping in the new image, so a newly-deployed revision never queries
+      # a table/column that doesn't exist yet. DATABASE_URL is assembled from
+      # Key Vault at deploy time (never stored as a GitHub secret) using the
+      # same OIDC-authenticated identity that just logged in above.
+      - name: Run Prisma migrations against production
+        working-directory: apps/web
+        run: |
+          PG_PASSWORD=$(az keyvault secret show --vault-name "$KEY_VAULT_NAME" --name POSTGRES-ADMIN-PASSWORD --query value -o tsv)
+          PG_HOST=$(az postgres flexible-server show --name specmate-pg --resource-group "$RESOURCE_GROUP" --query fullyQualifiedDomainName -o tsv)
+          export DATABASE_URL="postgresql://specmateadmin:${PG_PASSWORD}@${PG_HOST}:5432/specmate?sslmode=require"
+          npx prisma migrate deploy --schema prisma/schema.prisma
 
       - name: Deploy web to Container Apps (production)
         run: |
