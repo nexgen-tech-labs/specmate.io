@@ -28,6 +28,18 @@ export default async function ProjectSourcesPage({
     }),
   ]);
 
+  const versionedSourceIds = sources.filter((s) => s.previousVersionId).map((s) => s.id);
+  const diffSourceIds = versionedSourceIds.length
+    ? new Set(
+        (
+          await prisma.sourceDiff.findMany({
+            where: { sourceId: { in: versionedSourceIds } },
+            select: { sourceId: true },
+          })
+        ).map((d) => d.sourceId),
+      )
+    : new Set<string>();
+
   const rows: SourceRow[] = sources.map((source) => ({
     id: source.id,
     name: source.name,
@@ -36,6 +48,8 @@ export default async function ProjectSourcesPage({
     parseError: source.parseError,
     fragmentCount: source._count.rawRequirements,
     updatedAt: source.updatedAt.toISOString(),
+    isNewVersion: source.previousVersionId !== null,
+    hasDiff: diffSourceIds.has(source.id),
   }));
 
   const fragmentTotal = rows.reduce((sum, row) => sum + row.fragmentCount, 0);

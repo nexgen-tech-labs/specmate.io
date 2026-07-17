@@ -35,10 +35,12 @@ from app.services.connectors.ado_publish import (
     discover_project_meta,
     discover_projects,
     sort_for_hierarchy,
+    update_work_item,
     validate_required_fields,
 )
 from app.services.connectors.format_adapter import FormatMode
 from app.services.connectors.types import ConnectorError
+from app.services.connectors.update_detection import ExistingPublication, find_existing_publication
 
 router = APIRouter()
 
@@ -63,6 +65,7 @@ class AdoPublishGateway:
     projects: Callable[[AdoConnection], Awaitable[list[dict[str, str]]]] = discover_projects
     meta: Callable[[AdoConnection, str], Awaitable[dict[str, object]]] = discover_project_meta
     create: Callable[..., Awaitable[AdoPublishOutcome]] = create_work_item
+    update: Callable[..., Awaitable[AdoPublishOutcome]] = update_work_item
     health: Callable[[AdoConnection], Awaitable[dict[str, object]]] = dc_field(
         default=check_connection_health
     )
@@ -280,6 +283,9 @@ async def publish_to_ado(
 
     results: list[AdoPublishItemResult] = []
     candidates = []
+    # Issue 9.4: candidates whose item is a targeted-regen revision of an already-
+    # published item update that item's work item instead of creating a new one.
+    update_targets: dict[str, ExistingPublication] = {}
 
     for item_id in body.item_ids:
         item = items.get(item_id)
@@ -316,6 +322,9 @@ async def publish_to_ado(
         if validation_error:
             results.append(AdoPublishItemResult(item_id=item_id, ok=False, error=validation_error))
             continue
+        existing = await find_existing_publication(session, item, PublishTarget.ADO)
+        if existing is not None:
+            update_targets[item_id] = existing
         candidates.append(build_candidate(item, mode, item.parentId))
 
     connection = None
@@ -344,27 +353,47 @@ async def publish_to_ado(
             parent_url = work_item_api_url(parent_entry[0])
 
         assert connection is not None
-        outcome = await gateway.create(
-            connection,
-            mapping.remoteProject,
-            type_map[candidate.item_type],
-            candidate,
-            parent_url,
-            area_path,
-            iteration_path,
-            field_defaults,
-        )
+        existing = update_targets.get(candidate.item_id)
+        if existing is not None:
+            numeric_id = int(existing.external_key.removeprefix("AB#"))
+            outcome = await gateway.update(connection, numeric_id, candidate, field_defaults)
+        else:
+            outcome = await gateway.create(
+                connection,
+                mapping.remoteProject,
+                type_map[candidate.item_type],
+                candidate,
+                parent_url,
+                area_path,
+                iteration_path,
+                field_defaults,
+            )
 
         flags = dict(item.flags or {})
         if outcome.ok and outcome.key:
-            row = PublishedItem(
-                draftItemId=candidate.item_id,
-                targetTool=PublishTarget.ADO,
-                externalKey=outcome.key,
-                externalUrl=outcome.url or "",
-                createdAt=now,
-            )
-            session.add(row)
+            # Issue 9.5: snapshot what SpecMate just wrote for later drift comparison.
+            state_snapshot: dict[str, object] = {
+                "title": candidate.content.title,
+                "description": candidate.content.body_markdown,
+            }
+            if existing is not None:
+                row = await session.get(PublishedItem, existing.published_item_id)
+                assert row is not None
+                row.draftItemId = candidate.item_id
+                row.externalUrl = outcome.url or row.externalUrl
+                action = "draft_item.publish_updated"
+            else:
+                row = PublishedItem(
+                    draftItemId=candidate.item_id,
+                    targetTool=PublishTarget.ADO,
+                    externalKey=outcome.key,
+                    externalUrl=outcome.url or "",
+                    createdAt=now,
+                )
+                session.add(row)
+                action = "draft_item.published"
+            row.lastKnownState = state_snapshot
+            row.lastSyncedAt = now
             await session.flush()
             trace_rows = await session.execute(
                 select(TraceLink).where(TraceLink.draftItemId == candidate.item_id)
@@ -382,11 +411,12 @@ async def publish_to_ado(
                 session,
                 workspace_id=workspace.id,
                 project_id=project_id,
-                action="draft_item.published",
+                action=action,
                 entity_type="DraftItem",
                 entity_id=candidate.item_id,
                 actor_user_id=body.actor_user_id,
                 actor_type=AuditActorType.USER,
+                before={"tool": "ADO", "key": existing.external_key} if existing else None,
                 after={"tool": "ADO", "key": outcome.key, "url": outcome.url},
             )
         else:

@@ -35,6 +35,7 @@ class _FakeAdo:
     def __init__(self) -> None:
         self.counter = 0
         self.created: list[dict[str, object]] = []
+        self.updated: list[dict[str, object]] = []
 
     def gateway(self) -> AdoPublishGateway:
         async def fake_meta(_conn: object, _name: str) -> dict[str, object]:
@@ -60,6 +61,20 @@ class _FakeAdo:
                 item_id=candidate.item_id, ok=True, key=f"AB#{wid}", url=f"https://x/_workitems/edit/{wid}"
             )
 
+        async def fake_update(
+            _conn: object,
+            work_item_id: int,
+            candidate: AdoPublishCandidate,
+            _defaults: dict[str, object],
+        ) -> AdoPublishOutcome:
+            self.updated.append({"id": work_item_id, "title": candidate.content.title})
+            return AdoPublishOutcome(
+                item_id=candidate.item_id,
+                ok=True,
+                key=f"AB#{work_item_id}",
+                url=f"https://x/_workitems/edit/{work_item_id}",
+            )
+
         async def fake_health(_conn: object) -> dict[str, object]:
             return {"ok": True}
 
@@ -68,6 +83,7 @@ class _FakeAdo:
             projects=fake_projects,
             meta=fake_meta,
             create=fake_create,
+            update=fake_update,
             health=fake_health,
         )
 
@@ -283,5 +299,72 @@ def test_two_stage_workspace_requires_signoff() -> None:
     result = response.json()["results"][0]
     assert result["ok"] is False and "sign-off" in result["error"]
     assert fake.created == []
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_publishing_a_targeted_regen_revision_updates_not_duplicates() -> None:
+    """Issue 9.4: a revisionOfId'd DraftItem whose superseded item is already
+    published updates that ADO work item in place, not a new one."""
+    ids = asyncio.run(_fixture())
+    fake = _FakeAdo()
+    app.dependency_overrides[get_ado_gateway] = fake.gateway
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        first = client.post(f"/projects/{ids['project_id']}/publish/ado", json={"item_ids": [ids["epic_id"]]})
+        _dispose()
+        assert first.json()["succeeded"] == 1
+        original_key = fake.created[0]["id"]
+
+        async def make_revision() -> str:
+            engine = create_async_engine(settings.database_url)
+            try:
+                async with AsyncSession(engine) as session:
+                    revised = DraftItem(
+                        projectId=ids["project_id"], type="EPIC", title="Payments epic (revised)",
+                        description="Updated desc", status="APPROVED",
+                        revisionOfId=ids["epic_id"], createdAt=_now(), updatedAt=_now(),
+                    )
+                    session.add(revised)
+                    await session.flush()
+                    revised_id = revised.id
+                    await session.commit()
+                    return revised_id
+            finally:
+                await engine.dispose()
+
+        revised_id = asyncio.run(make_revision())
+        response = client.post(f"/projects/{ids['project_id']}/publish/ado", json={"item_ids": [revised_id]})
+    finally:
+        app.dependency_overrides.pop(get_ado_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["ok"] is True
+    assert result["key"] == f"AB#{original_key}"
+    assert fake.created == [fake.created[0]]  # no second work item
+    assert len(fake.updated) == 1 and fake.updated[0]["id"] == original_key
+
+    async def check_single_published_row() -> int:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                rows = list(
+                    (
+                        await session.execute(
+                            select(PublishedItem).where(
+                                PublishedItem.draftItemId.in_([ids["epic_id"], revised_id])
+                            )
+                        )
+                    ).scalars()
+                )
+                return len(rows)
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(check_single_published_row()) == 1
 
     asyncio.run(_cleanup(ids))

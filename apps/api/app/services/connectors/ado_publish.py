@@ -256,6 +256,118 @@ async def create_work_item(
     )
 
 
+async def update_work_item(
+    connection: AdoConnection,
+    work_item_id: int,
+    candidate: AdoPublishCandidate,
+    field_defaults: dict[str, object],
+) -> AdoPublishOutcome:
+    """Updates title/description/field-defaults on an already-published work item
+    (Issue 9.4) — never touches area/iteration/parent relations, which are set once
+    at creation and are not part of a source-content update."""
+    ops: list[dict[str, object]] = [
+        {"op": "replace", "path": "/fields/System.Title", "value": candidate.content.title[:255]},
+        {
+            "op": "replace",
+            "path": "/fields/System.Description",
+            "value": candidate.content.body_markdown,
+        },
+    ]
+    for field_id, value in field_defaults.items():
+        ops.append({"op": "replace", "path": f"/fields/{field_id}", "value": value})
+
+    last_error = "unknown"
+    async with httpx.AsyncClient(auth=connection.auth(), timeout=30) as client:
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                response = await client.patch(
+                    f"{connection.org_url()}/_apis/wit/workitems/{work_item_id}",
+                    params={"api-version": connection.api_version()},
+                    json=ops,
+                    headers={"Content-Type": "application/json-patch+json"},
+                )
+            except httpx.HTTPError as exc:
+                last_error = f"network error: {exc}"
+                await asyncio.sleep(_BACKOFF_BASE_S * attempt)
+                continue
+
+            if response.status_code in (200, 201):
+                return AdoPublishOutcome(
+                    item_id=candidate.item_id,
+                    ok=True,
+                    key=f"AB#{work_item_id}",
+                    url=f"{connection.org_url()}/_workitems/edit/{work_item_id}",
+                    attempts=attempt,
+                )
+            if response.status_code == 429 or response.status_code >= 500:
+                retry_after = response.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else _BACKOFF_BASE_S * attempt
+                last_error = f"HTTP {response.status_code} (transient)"
+                await asyncio.sleep(delay)
+                continue
+            try:
+                detail = response.json()
+            except ValueError:
+                detail = response.text[:300]
+            return AdoPublishOutcome(
+                item_id=candidate.item_id,
+                ok=False,
+                error=f"ADO rejected the work item update ({response.status_code}): {detail}",
+                attempts=attempt,
+            )
+
+    return AdoPublishOutcome(
+        item_id=candidate.item_id,
+        ok=False,
+        error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
+        attempts=_MAX_ATTEMPTS,
+    )
+
+
+async def add_comment(connection: AdoConnection, project_name: str, work_item_id: int, comment_text: str) -> None:
+    """Flags a work item for reviewer attention (Issue 9.4) when its source
+    requirement was removed — a comment, never an auto-close, so a human decides."""
+    async with httpx.AsyncClient(auth=connection.auth(), timeout=30) as client:
+        try:
+            response = await client.post(
+                f"{connection.org_url()}/{project_name}/_apis/wit/workItems/{work_item_id}/comments",
+                params={"api-version": "7.1-preview.3"},
+                json={"text": comment_text},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ConnectorError(f"Failed to comment on work item {work_item_id}: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class RemoteWorkItemState:
+    id: int
+    title: str
+    description: str
+    status: str
+
+
+async def fetch_work_item(connection: AdoConnection, work_item_id: int) -> RemoteWorkItemState:
+    """Reads current title/description/state straight from ADO (Issue 9.5's drift
+    check) — never cached, always the live remote state."""
+    async with httpx.AsyncClient(auth=connection.auth(), timeout=30) as client:
+        try:
+            response = await client.get(
+                f"{connection.org_url()}/_apis/wit/workitems/{work_item_id}",
+                params={"api-version": connection.api_version()},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ConnectorError(f"Failed to fetch work item {work_item_id}: {exc}") from exc
+    fields = response.json().get("fields", {})
+    return RemoteWorkItemState(
+        id=work_item_id,
+        title=str(fields.get("System.Title", "")),
+        description=str(fields.get("System.Description", "")),
+        status=str(fields.get("System.State", "")),
+    )
+
+
 def build_candidate(item: DraftItem, mode: FormatMode, parent_item_id: str | None) -> AdoPublishCandidate:
     return AdoPublishCandidate(
         item_id=item.id,

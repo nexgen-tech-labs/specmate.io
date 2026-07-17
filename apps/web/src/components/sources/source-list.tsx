@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 export interface SourceRow {
@@ -11,6 +12,10 @@ export interface SourceRow {
   parseError: string | null;
   fragmentCount: number;
   updatedAt: string;
+  // Issue 9.1/9.2/9.3: set when this Source is a new version of a previous upload —
+  // surfaces the "regenerate delta" / "review delta" actions.
+  isNewVersion: boolean;
+  hasDiff: boolean;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -32,6 +37,24 @@ export function SourceList({
   const router = useRouter();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  async function targetedRegenerate(sourceId: string) {
+    setBusyId(sourceId);
+    setActionError(null);
+    const res = await fetch(
+      `/api/workspaces/${workspaceId}/projects/${projectId}/sources/${sourceId}/targeted-regenerate`,
+      { method: 'POST' },
+    );
+    setBusyId(null);
+    if (!res.ok) {
+      const body: { error?: string; detail?: string } = await res.json().catch(() => ({}));
+      setActionError(body.detail ?? body.error ?? 'Targeted regeneration failed.');
+      return;
+    }
+    router.push(
+      `/workspaces/${workspaceId}/projects/${projectId}/sources/${sourceId}/delta-review`,
+    );
+  }
 
   async function reparse(sourceId: string) {
     setBusyId(sourceId);
@@ -114,6 +137,33 @@ export function SourceList({
             </div>
             {source.status === 'FAILED' && source.parseError ? (
               <p className="mt-2 text-xs text-red">{source.parseError}</p>
+            ) : null}
+            {source.isNewVersion && source.status === 'PARSED' ? (
+              <div className="mt-2 flex items-center gap-2 border-t border-line pt-2">
+                <span className="font-mono text-[10px] font-bold tracking-wide text-cobalt">
+                  NEW VERSION
+                </span>
+                {source.hasDiff ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={busyId === source.id}
+                      onClick={() => void targetedRegenerate(source.id)}
+                      className="rounded border border-cobalt px-2 py-0.5 text-xs font-semibold text-cobalt hover:bg-cobalt-soft disabled:opacity-50"
+                    >
+                      {busyId === source.id ? 'Regenerating…' : 'Regenerate delta'}
+                    </button>
+                    <Link
+                      href={`/workspaces/${workspaceId}/projects/${projectId}/sources/${source.id}/delta-review`}
+                      className="text-xs text-cobalt underline-offset-2 hover:underline"
+                    >
+                      Review delta →
+                    </Link>
+                  </>
+                ) : (
+                  <span className="text-xs text-sub">Diff not ready yet.</span>
+                )}
+              </div>
             ) : null}
           </li>
         ))}

@@ -39,9 +39,11 @@ from app.services.connectors.jira_publish import (
     discover_project_meta,
     discover_projects,
     sort_for_hierarchy,
+    update_issue,
     validate_required_fields,
 )
 from app.services.connectors.types import ConnectorError
+from app.services.connectors.update_detection import ExistingPublication, find_existing_publication
 
 router = APIRouter()
 
@@ -68,6 +70,7 @@ class PublishGateway:
     projects: Callable[[JiraConnection], Awaitable[list[dict[str, str]]]] = discover_projects
     meta: Callable[[JiraConnection, str], Awaitable[dict[str, object]]] = discover_project_meta
     create: Callable[..., Awaitable[PublishOutcome]] = create_issue
+    update: Callable[..., Awaitable[PublishOutcome]] = update_issue
     health: Callable[[JiraConnection], Awaitable[dict[str, object]]] = dc_field(
         default=check_connection_health
     )
@@ -270,6 +273,9 @@ async def publish_to_jira(
 
     results: list[PublishItemResult] = []
     candidates: list[PublishCandidate] = []
+    # Issue 9.4: candidates whose item is a targeted-regen revision of an already-
+    # published item update that item's external issue instead of creating a new one.
+    update_targets: dict[str, ExistingPublication] = {}
 
     for item_id in body.item_ids:
         item = items.get(item_id)
@@ -318,6 +324,9 @@ async def publish_to_jira(
         if validation_error:
             results.append(PublishItemResult(item_id=item_id, ok=False, error=validation_error))
             continue
+        existing = await find_existing_publication(session, item, PublishTarget.JIRA)
+        if existing is not None:
+            update_targets[item_id] = existing
         candidates.append(
             PublishCandidate(
                 item_id=item_id,
@@ -357,25 +366,47 @@ async def publish_to_jira(
                 continue
 
         assert connection is not None
-        outcome = await gateway.create(
-            connection,
-            mapping.remoteProject,
-            type_map[candidate.item_type],
-            candidate,
-            parent_key,
-            field_defaults,
-        )
+        existing = update_targets.get(candidate.item_id)
+        if existing is not None:
+            outcome = await gateway.update(connection, existing.external_key, candidate, field_defaults)
+        else:
+            outcome = await gateway.create(
+                connection,
+                mapping.remoteProject,
+                type_map[candidate.item_type],
+                candidate,
+                parent_key,
+                field_defaults,
+            )
 
         flags = dict(item.flags or {})
         if outcome.ok and outcome.key:
-            published = PublishedItem(
-                draftItemId=candidate.item_id,
-                targetTool=PublishTarget.JIRA,
-                externalKey=outcome.key,
-                externalUrl=outcome.url or "",
-                createdAt=now,
-            )
-            session.add(published)
+            # Issue 9.5: snapshot what SpecMate just wrote, so a later drift check
+            # compares the remote against SpecMate's own last-known-good state.
+            state_snapshot: dict[str, object] = {
+                "title": candidate.title,
+                "description": candidate.description,
+            }
+            if existing is not None:
+                # Re-point the existing PublishedItem row to the new (revised) item
+                # rather than creating a second row — one external issue, one record.
+                published = await session.get(PublishedItem, existing.published_item_id)
+                assert published is not None
+                published.draftItemId = candidate.item_id
+                published.externalUrl = outcome.url or published.externalUrl
+                action = "draft_item.publish_updated"
+            else:
+                published = PublishedItem(
+                    draftItemId=candidate.item_id,
+                    targetTool=PublishTarget.JIRA,
+                    externalKey=outcome.key,
+                    externalUrl=outcome.url or "",
+                    createdAt=now,
+                )
+                session.add(published)
+                action = "draft_item.published"
+            published.lastKnownState = state_snapshot
+            published.lastSyncedAt = now
             await session.flush()
             # Forward-trace write-back (Issue 5.5): Source -> fragment -> item -> Jira key.
             trace_rows = await session.execute(
@@ -397,11 +428,12 @@ async def publish_to_jira(
                 session,
                 workspace_id=workspace.id,
                 project_id=project_id,
-                action="draft_item.published",
+                action=action,
                 entity_type="DraftItem",
                 entity_id=candidate.item_id,
                 actor_user_id=body.actor_user_id,
                 actor_type=AuditActorType.USER,
+                before={"tool": "JIRA", "key": existing.external_key} if existing else None,
                 after={"tool": "JIRA", "key": outcome.key, "url": outcome.url},
             )
         else:

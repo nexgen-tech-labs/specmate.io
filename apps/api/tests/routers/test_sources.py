@@ -22,7 +22,7 @@ from reportlab.pdfgen import canvas
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import Project, RawRequirement, Source, Workspace
+from app.models import Project, RawRequirement, Source, SourceDiff, Workspace
 from app.routers.sources import get_blob_downloader
 from app.services.parsing.docx_parser import DocxParseError
 from app.services.storage.blob_client import BlobDownloadError
@@ -97,6 +97,40 @@ async def _create_source(kind: str = "DOCX", storage_key: str | None = "some/key
         await engine.dispose()
 
 
+async def _create_new_version(
+    project_id: str, previous_source_id: str, previous_version: int, storage_key: str
+) -> str:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            source = Source(
+                projectId=project_id,
+                name="test.docx",
+                kind="DOCX",
+                storageKey=storage_key,
+                version=previous_version + 1,
+                previousVersionId=previous_source_id,
+                createdAt=_now(),
+                updatedAt=_now(),
+            )
+            session.add(source)
+            await session.flush()
+            new_id = source.id
+            await session.commit()
+            return new_id
+    finally:
+        await engine.dispose()
+
+
+def _docx_bytes(paragraphs: list[str]) -> bytes:
+    document = Document()
+    for p in paragraphs:
+        document.add_paragraph(p)
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
 async def _fetch_source_status(source_id: str) -> str:
     engine = create_async_engine(settings.database_url)
     try:
@@ -121,14 +155,18 @@ async def _count_raw_requirements(source_id: str) -> int:
         await engine.dispose()
 
 
-async def _cleanup(ids: dict[str, str]) -> None:
+async def _cleanup(ids: dict[str, str], extra_source_ids: list[str] | None = None) -> None:
     engine = create_async_engine(settings.database_url)
     try:
         async with AsyncSession(engine) as session:
+            all_source_ids = [ids["source_id"], *(extra_source_ids or [])]
             await session.execute(
-                delete(RawRequirement).where(RawRequirement.sourceId == ids["source_id"])
+                delete(SourceDiff).where(SourceDiff.sourceId.in_(all_source_ids))
             )
-            await session.execute(delete(Source).where(Source.id == ids["source_id"]))
+            await session.execute(
+                delete(RawRequirement).where(RawRequirement.sourceId.in_(all_source_ids))
+            )
+            await session.execute(delete(Source).where(Source.id.in_(all_source_ids)))
             await session.execute(delete(Project).where(Project.id == ids["project_id"]))
             await purge_audit_events(session, ids["workspace_id"])
             await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
@@ -355,5 +393,68 @@ def test_reparse_project_reprocesses_all_parseable_sources() -> None:
     assert len(results) == 1
     assert results[0]["status"] == "PARSED"
     assert results[0]["chunk_count"] == 1
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_parsing_a_new_version_computes_and_persists_a_diff() -> None:
+    ids = asyncio.run(_create_source())
+
+    async def v1_downloader(_storage_key: str) -> bytes:
+        return _docx_bytes(["Unchanged paragraph.", "Old scope text."])
+
+    app.dependency_overrides[get_blob_downloader] = lambda: v1_downloader
+    client = TestClient(app)
+    try:
+        client.post(f"/sources/{ids['source_id']}/parse")
+    finally:
+        app.dependency_overrides.pop(get_blob_downloader, None)
+        _dispose_app_engine()
+
+    v2_id = asyncio.run(
+        _create_new_version(ids["project_id"], ids["source_id"], previous_version=1, storage_key="v2/key.docx")
+    )
+
+    async def v2_downloader(_storage_key: str) -> bytes:
+        return _docx_bytes(["Unchanged paragraph.", "New scope text.", "Brand new paragraph."])
+
+    app.dependency_overrides[get_blob_downloader] = lambda: v2_downloader
+    client = TestClient(app)
+    try:
+        parse_response = client.post(f"/sources/{v2_id}/parse")
+    finally:
+        app.dependency_overrides.pop(get_blob_downloader, None)
+        _dispose_app_engine()
+
+    assert parse_response.status_code == 200
+
+    client = TestClient(app)
+    diff_response = client.get(f"/sources/{v2_id}/diff")
+    _dispose_app_engine()
+
+    assert diff_response.status_code == 200
+    body = diff_response.json()
+    assert body["source_id"] == v2_id
+    assert body["previous_source_id"] == ids["source_id"]
+    assert body["unchanged_count"] == 1
+    assert body["modified_count"] == 1
+    assert body["added_count"] == 1
+    assert body["removed_count"] == 0
+
+    # Previous version's RawRequirements remain queryable, untouched.
+    assert asyncio.run(_count_raw_requirements(ids["source_id"])) == 2
+    assert asyncio.run(_count_raw_requirements(v2_id)) == 3
+
+    asyncio.run(_cleanup(ids, extra_source_ids=[v2_id]))
+
+
+def test_diff_returns_404_for_a_source_with_no_previous_version() -> None:
+    ids = asyncio.run(_create_source())
+
+    client = TestClient(app)
+    response = client.get(f"/sources/{ids['source_id']}/diff")
+    _dispose_app_engine()
+
+    assert response.status_code == 404
 
     asyncio.run(_cleanup(ids))

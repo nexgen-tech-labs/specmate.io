@@ -246,9 +246,27 @@ class Source(Base):
     scanStatus: Mapped[ScanStatus] = mapped_column(
         Enum(ScanStatus, name="ScanStatus", create_type=False), default=ScanStatus.PENDING
     )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    previousVersionId: Mapped[str | None] = mapped_column(
+        ForeignKey("Source.id"), nullable=True
+    )
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SourceDiff(Base):
+    __tablename__ = "SourceDiff"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    sourceId: Mapped[str] = mapped_column(ForeignKey("Source.id"))
+    previousSourceId: Mapped[str] = mapped_column(String)
+    addedCount: Mapped[int] = mapped_column(Integer)
+    removedCount: Mapped[int] = mapped_column(Integer)
+    modifiedCount: Mapped[int] = mapped_column(Integer)
+    unchangedCount: Mapped[int] = mapped_column(Integer)
+    fragments: Mapped[list[dict[str, object]]] = mapped_column(JSONB)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
 
 
 class RawRequirement(Base):
@@ -289,6 +307,7 @@ class DraftItem(Base):
     originalDraft: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     editHistory: Mapped[list[object] | None] = mapped_column(JSONB, nullable=True)
     revisionOfId: Mapped[str | None] = mapped_column(String, nullable=True)
+    sourceVersionId: Mapped[str | None] = mapped_column(String, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -320,8 +339,29 @@ class PublishedItem(Base):
     )
     externalKey: Mapped[str] = mapped_column(String)
     externalUrl: Mapped[str] = mapped_column(String)
+    lastKnownState: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    lastSyncedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class DriftResolution(str, enum.Enum):
+    ACCEPT_EXTERNAL = "ACCEPT_EXTERNAL"
+    REASSERT_SPECMATE = "REASSERT_SPECMATE"
+
+
+class DriftFlag(Base):
+    __tablename__ = "DriftFlag"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    publishedItemId: Mapped[str] = mapped_column(ForeignKey("PublishedItem.id"))
+    diff: Mapped[dict[str, object]] = mapped_column(JSONB)
+    detectedAt: Mapped[datetime] = mapped_column(DateTime)
+    resolution: Mapped[DriftResolution | None] = mapped_column(
+        Enum(DriftResolution, name="DriftResolution", create_type=False), nullable=True
+    )
+    resolvedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolvedByUserId: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class AuditActorType(str, enum.Enum):

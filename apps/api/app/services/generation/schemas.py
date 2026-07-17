@@ -238,3 +238,17 @@ REGENERATE_SCHEMA: dict[str, object] = {
     "required": ["title", "description"],
     "additionalProperties": False,
 }
+
+# Issue 9.2: drafting a single item from one newly-added fragment — needs its own
+# type (STORY vs TASK), unlike REGENERATE_SCHEMA which keeps the superseded item's type.
+NEW_FROM_FRAGMENT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": ["STORY", "TASK"]},
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "extra": _EXTRA_SCHEMA,
+    },
+    "required": ["type", "title", "description"],
+    "additionalProperties": False,
+}

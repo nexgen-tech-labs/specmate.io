@@ -33,6 +33,14 @@ export interface ReviewItem {
   publishedKey: string | null;
   publishedUrl: string | null;
   duplicateReference: { title: string; description: string; state: string } | null;
+  // Issue 9.3: present only in the delta review queue — what changed in the source
+  // and (for revised items) the previous item's title/description side-by-side.
+  deltaContext?: {
+    reason: 'new' | 'modified' | 'removed';
+    sourceName: string;
+    changedFragmentText: string;
+    previousVersion: { title: string; description: string } | null;
+  } | null;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -83,6 +91,20 @@ export function ReviewQueue({
   const [gapAnswer, setGapAnswer] = useState('');
   const [showDiff, setShowDiff] = useState(false);
   const [traceItemId, setTraceItemId] = useState<string | null>(null);
+  const [flaggedIds, setFlaggedIds] = useState<Set<string>>(new Set());
+
+  async function flagRemoved(itemId: string): Promise<void> {
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`${base}/${itemId}/flag-removed`, { method: 'POST' });
+    setBusy(false);
+    if (!res.ok) {
+      const payload: { error?: string; detail?: string } = await res.json().catch(() => ({}));
+      setError(payload.detail ?? payload.error ?? 'Could not flag the external issue.');
+      return;
+    }
+    setFlaggedIds((prev) => new Set(prev).add(itemId));
+  }
 
   async function call(url: string, body: unknown): Promise<boolean> {
     setBusy(true);
@@ -338,6 +360,44 @@ export function ReviewQueue({
                   ) : (
                     <p className="text-ink">{item.description}</p>
                   )}
+
+                  {item.deltaContext ? (
+                    <div className="mt-3 rounded border border-cobalt/40 bg-cobalt-soft p-3 text-xs">
+                      <p className="font-mono font-bold text-cobalt">
+                        {item.deltaContext.reason === 'new'
+                          ? 'NEW — FROM UPDATED SOURCE'
+                          : item.deltaContext.reason === 'removed'
+                            ? 'SOURCE CONTENT REMOVED'
+                            : 'REVISED — SOURCE CHANGED'}
+                      </p>
+                      <p className="mt-1 text-sub">
+                        {item.deltaContext.sourceName}: “{item.deltaContext.changedFragmentText}”
+                      </p>
+                      {item.deltaContext.previousVersion ? (
+                        <div className="mt-2 border-t border-line pt-2">
+                          <p className="font-mono text-[10px] font-bold text-sub">
+                            PREVIOUS VERSION
+                          </p>
+                          <p className="mt-1 text-ink">{item.deltaContext.previousVersion.title}</p>
+                          <p className="mt-1 text-sub">
+                            {item.deltaContext.previousVersion.description}
+                          </p>
+                        </div>
+                      ) : null}
+                      {item.deltaContext.reason === 'removed' && item.publishedKey ? (
+                        <button
+                          type="button"
+                          disabled={busy || flaggedIds.has(item.id)}
+                          onClick={() => void flagRemoved(item.id)}
+                          className="mt-2 rounded border border-cobalt px-2 py-1 font-mono text-[10px] font-semibold text-cobalt disabled:opacity-50"
+                        >
+                          {flaggedIds.has(item.id)
+                            ? 'Flagged on ' + item.publishedKey + ' ✓'
+                            : `Flag ${item.publishedKey} for reviewer (comment, never auto-close)`}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   {showDiff && item.originalDraft ? (
                     <div className="mt-3 rounded border border-line bg-paper p-3 text-xs">

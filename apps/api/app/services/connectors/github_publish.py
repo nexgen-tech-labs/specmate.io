@@ -225,6 +225,101 @@ async def update_issue_body(connection: GitHubConnection, repo: str, issue_numbe
             raise ConnectorError(f"Failed to update issue #{issue_number} task list: {exc}") from exc
 
 
+async def update_issue(
+    connection: GitHubConnection,
+    repo: str,
+    issue_number: int,
+    candidate: GitHubPublishCandidate,
+) -> GitHubPublishOutcome:
+    """Updates title/body on an already-published issue (Issue 9.4) — labels and
+    milestone are set once at creation and not touched by a source-content update."""
+    last_error = "unknown"
+    async with httpx.AsyncClient(headers=connection.headers(), timeout=30) as client:
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                response = await client.patch(
+                    f"{connection.base_url()}/repos/{repo}/issues/{issue_number}",
+                    json={"title": candidate.content.title, "body": candidate.content.body_markdown},
+                )
+            except httpx.HTTPError as exc:
+                last_error = f"network error: {exc}"
+                await asyncio.sleep(_BACKOFF_BASE_S * attempt)
+                continue
+
+            if response.status_code == 200:
+                return GitHubPublishOutcome(
+                    item_id=candidate.item_id,
+                    ok=True,
+                    key=f"#{issue_number}",
+                    url=str(response.json().get("html_url", "")),
+                    number=issue_number,
+                    attempts=attempt,
+                )
+            if response.status_code == 403 or response.status_code == 429 or response.status_code >= 500:
+                retry_after = response.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else _BACKOFF_BASE_S * attempt
+                last_error = f"HTTP {response.status_code} (transient)"
+                await asyncio.sleep(delay)
+                continue
+            try:
+                detail = response.json()
+            except ValueError:
+                detail = response.text[:300]
+            return GitHubPublishOutcome(
+                item_id=candidate.item_id,
+                ok=False,
+                error=f"GitHub rejected the issue update ({response.status_code}): {detail}",
+                attempts=attempt,
+            )
+
+    return GitHubPublishOutcome(
+        item_id=candidate.item_id,
+        ok=False,
+        error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
+        attempts=_MAX_ATTEMPTS,
+    )
+
+
+async def add_comment(connection: GitHubConnection, repo: str, issue_number: int, comment_text: str) -> None:
+    """Flags an issue for reviewer attention (Issue 9.4) when its source requirement
+    was removed — a comment, never an auto-close, so a human decides what happens."""
+    async with httpx.AsyncClient(headers=connection.headers(), timeout=30) as client:
+        try:
+            response = await client.post(
+                f"{connection.base_url()}/repos/{repo}/issues/{issue_number}/comments",
+                json={"body": comment_text},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ConnectorError(f"Failed to comment on issue #{issue_number}: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class RemoteIssueState:
+    number: int
+    title: str
+    description: str
+    status: str
+
+
+async def fetch_issue(connection: GitHubConnection, repo: str, issue_number: int) -> RemoteIssueState:
+    """Reads current title/body/state straight from GitHub (Issue 9.5's drift
+    check) — never cached, always the live remote state."""
+    async with httpx.AsyncClient(headers=connection.headers(), timeout=30) as client:
+        try:
+            response = await client.get(f"{connection.base_url()}/repos/{repo}/issues/{issue_number}")
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ConnectorError(f"Failed to fetch issue #{issue_number}: {exc}") from exc
+    body = response.json()
+    return RemoteIssueState(
+        number=issue_number,
+        title=str(body.get("title", "")),
+        description=str(body.get("body") or ""),
+        status=str(body.get("state", "")),
+    )
+
+
 def build_candidate(
     item: DraftItem, mode: FormatMode, parent_item_id: str | None, file_references: list[str] | None = None
 ) -> GitHubPublishCandidate:

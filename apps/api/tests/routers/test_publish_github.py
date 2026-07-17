@@ -32,6 +32,7 @@ class _FakeGitHub:
         self.counter = 0
         self.created: list[dict[str, object]] = []
         self.updated_bodies: list[tuple[int, str]] = []
+        self.updated: list[dict[str, object]] = []
         self.fail_first = fail_first
         self._failed_once = False
 
@@ -60,6 +61,21 @@ class _FakeGitHub:
                 url=f"https://github.com/acme/payments/issues/{number}",
             )
 
+        async def fake_update(
+            _conn: object,
+            _repo: str,
+            issue_number: int,
+            candidate: GitHubPublishCandidate,
+        ) -> GitHubPublishOutcome:
+            self.updated.append({"number": issue_number, "title": candidate.content.title})
+            return GitHubPublishOutcome(
+                item_id=candidate.item_id,
+                ok=True,
+                key=f"#{issue_number}",
+                number=issue_number,
+                url=f"https://github.com/acme/payments/issues/{issue_number}",
+            )
+
         async def fake_update_body(_conn: object, _repo: str, number: int, body: str) -> None:
             self.updated_bodies.append((number, body))
 
@@ -71,6 +87,7 @@ class _FakeGitHub:
             repos=fake_repos,
             meta=fake_meta,
             create=fake_create,
+            update=fake_update,
             update_body=fake_update_body,
             health=fake_health,
         )
@@ -322,5 +339,72 @@ def test_permanent_failure_does_not_roll_back_batch_and_is_individually_retriabl
         app.dependency_overrides.pop(get_github_gateway, None)
         _dispose()
     assert retry.json()["results"][0]["ok"] is True
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_publishing_a_targeted_regen_revision_updates_not_duplicates() -> None:
+    """Issue 9.4: a revisionOfId'd DraftItem whose superseded item is already
+    published updates that GitHub issue in place, not a new one."""
+    ids = asyncio.run(_fixture())
+    fake = _FakeGitHub()
+    app.dependency_overrides[get_github_gateway] = fake.gateway
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        first = client.post(f"/projects/{ids['project_id']}/publish/github", json={"item_ids": [ids["epic_id"]]})
+        _dispose()
+        assert first.json()["succeeded"] == 1
+        original_number = fake.created[0]["number"]
+
+        async def make_revision() -> str:
+            engine = create_async_engine(settings.database_url)
+            try:
+                async with AsyncSession(engine) as session:
+                    revised = DraftItem(
+                        projectId=ids["project_id"], type="EPIC", title="Payments epic (revised)",
+                        description="Updated desc", status="APPROVED",
+                        revisionOfId=ids["epic_id"], createdAt=_now(), updatedAt=_now(),
+                    )
+                    session.add(revised)
+                    await session.flush()
+                    revised_id = revised.id
+                    await session.commit()
+                    return revised_id
+            finally:
+                await engine.dispose()
+
+        revised_id = asyncio.run(make_revision())
+        response = client.post(f"/projects/{ids['project_id']}/publish/github", json={"item_ids": [revised_id]})
+    finally:
+        app.dependency_overrides.pop(get_github_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["ok"] is True
+    assert result["key"] == f"#{original_number}"
+    assert fake.created == [fake.created[0]]  # no second issue
+    assert len(fake.updated) == 1 and fake.updated[0]["number"] == original_number
+
+    async def check_single_published_row() -> int:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                rows = list(
+                    (
+                        await session.execute(
+                            select(PublishedItem).where(
+                                PublishedItem.draftItemId.in_([ids["epic_id"], revised_id])
+                            )
+                        )
+                    ).scalars()
+                )
+                return len(rows)
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(check_single_published_row()) == 1
 
     asyncio.run(_cleanup(ids))

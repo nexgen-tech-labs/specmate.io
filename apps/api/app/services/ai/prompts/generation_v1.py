@@ -47,3 +47,12 @@ REGENERATE_V1 = """You are a senior business analyst revising one delivery item.
 Rewrite the item using the reviewer's additional context. Keep what was right, fix what the
 context corrects, and keep the same item type and general scope. Fill type-specific fields
 in extra when applicable."""
+
+# Issue 9.2: a source was updated and this fragment is brand new (not a revision of
+# anything previously ingested) — draft a single delivery item purely from it, with no
+# prior version to anchor against.
+NEW_FROM_FRAGMENT_V1 = """You are a senior business analyst drafting one delivery item from a
+single new requirement fragment that was just added to a previously-ingested source document.
+Produce one story (or task, if it's clearly implementation-level, not user-facing) that captures
+exactly what the fragment describes — no invention beyond it. Fill type-specific fields in extra
+when applicable."""

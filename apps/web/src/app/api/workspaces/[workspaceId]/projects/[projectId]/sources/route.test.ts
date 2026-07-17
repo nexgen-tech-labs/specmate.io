@@ -37,22 +37,30 @@ function makeFile(name: string, type: string, sizeBytes: number): FakeFile {
 // File/FormData/Request polyfills don't interoperate with the Next.js route handler's
 // native (Node) Request.formData() parsing — so the multipart body is built by hand here
 // instead of relying on `new Request({ body: new FormData() })`.
-function makeUploadRequest(file: FakeFile): Request {
+function makeUploadRequest(file: FakeFile, previousVersionId?: string): Request {
   const boundary = '----vitest-boundary';
   const fileBuffer = Buffer.alloc(file.sizeBytes);
 
-  const body = Buffer.concat([
+  const parts = [
     Buffer.from(
       `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: ${file.type}\r\n\r\n`,
     ),
     fileBuffer,
-    Buffer.from(`\r\n--${boundary}--\r\n`),
-  ]);
+    Buffer.from(`\r\n`),
+  ];
+  if (previousVersionId) {
+    parts.push(
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="previousVersionId"\r\n\r\n${previousVersionId}\r\n`,
+      ),
+    );
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
 
   return new Request('http://localhost/api/workspaces/x/projects/y/sources', {
     method: 'POST',
     headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
-    body,
+    body: Buffer.concat(parts),
   });
 }
 
@@ -215,6 +223,66 @@ describe('POST /api/workspaces/[workspaceId]/projects/[projectId]/sources', () =
     });
     expect(res.status).toBe(201);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('auto-detects a new version by filename similarity (v3 -> v4)', async () => {
+    currentSession = { user: { id: admin.id } };
+    const v3 = await POST(
+      makeUploadRequest(makeFile('Client-Requirements-v3.docx', 'application/pdf', 100)),
+      { params: params() },
+    );
+    const v3Body: { source: { id: string; version: number } } = await v3.json();
+    expect(v3Body.source.version).toBe(1);
+
+    const v4 = await POST(
+      makeUploadRequest(makeFile('Client-Requirements-v4.docx', 'application/pdf', 100)),
+      { params: params() },
+    );
+    expect(v4.status).toBe(201);
+    const v4Body: {
+      source: { id: string; version: number; previousVersionId: string | null };
+    } = await v4.json();
+    expect(v4Body.source.version).toBe(2);
+    expect(v4Body.source.previousVersionId).toBe(v3Body.source.id);
+
+    // Previous version's Source row is untouched, not overwritten.
+    const previous = await prisma.source.findUnique({ where: { id: v3Body.source.id } });
+    expect(previous).not.toBeNull();
+    expect(previous?.deletedAt).toBeNull();
+  });
+
+  it('an unrelated filename is not treated as a new version', async () => {
+    currentSession = { user: { id: admin.id } };
+    const res = await POST(
+      makeUploadRequest(makeFile('Totally-Unrelated-Doc.docx', 'application/pdf', 100)),
+      { params: params() },
+    );
+    const body: { source: { version: number; previousVersionId: string | null } } =
+      await res.json();
+    expect(body.source.version).toBe(1);
+    expect(body.source.previousVersionId).toBeNull();
+  });
+
+  it('explicit previousVersionId overrides filename-based auto-detection', async () => {
+    currentSession = { user: { id: admin.id } };
+    const original = await POST(
+      makeUploadRequest(makeFile('Backlog-Export.xlsx', 'text/csv', 100)),
+      { params: params() },
+    );
+    const originalBody: { source: { id: string } } = await original.json();
+
+    const linked = await POST(
+      makeUploadRequest(
+        makeFile('Completely-Different-Name.xlsx', 'text/csv', 100),
+        originalBody.source.id,
+      ),
+      { params: params() },
+    );
+    expect(linked.status).toBe(201);
+    const linkedBody: { source: { version: number; previousVersionId: string | null } } =
+      await linked.json();
+    expect(linkedBody.source.version).toBe(2);
+    expect(linkedBody.source.previousVersionId).toBe(originalBody.source.id);
   });
 
   it('does not fail the upload response when the parse trigger call fails', async () => {

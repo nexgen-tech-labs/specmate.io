@@ -239,3 +239,124 @@ async def create_issue(
         error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
         attempts=_MAX_ATTEMPTS,
     )
+
+
+async def update_issue(
+    connection: JiraConnection,
+    issue_key: str,
+    candidate: PublishCandidate,
+    field_defaults: dict[str, object],
+) -> PublishOutcome:
+    """Updates summary/description/field-defaults on an already-published issue
+    (Issue 9.4) — never touches project/issuetype/parent, set once at creation."""
+    description = candidate.description
+    if candidate.extra_description:
+        description += f"\n{candidate.extra_description}"
+
+    fields: dict[str, object] = {
+        "summary": candidate.title[:255],
+        "description": _adf(description),
+        **field_defaults,
+    }
+
+    last_error = "unknown"
+    async with httpx.AsyncClient(auth=connection.auth(), timeout=30) as client:
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                response = await client.put(
+                    f"{connection.base_url()}/rest/api/{connection.api_version()}/issue/{issue_key}",
+                    json={"fields": fields},
+                )
+            except httpx.HTTPError as exc:
+                last_error = f"network error: {exc}"
+                await asyncio.sleep(_BACKOFF_BASE_S * attempt)
+                continue
+
+            if response.status_code in (200, 204):
+                return PublishOutcome(
+                    item_id=candidate.item_id,
+                    ok=True,
+                    key=issue_key,
+                    url=f"{connection.base_url()}/browse/{issue_key}",
+                    attempts=attempt,
+                )
+            if response.status_code == 429 or response.status_code >= 500:
+                retry_after = response.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else _BACKOFF_BASE_S * attempt
+                last_error = f"HTTP {response.status_code} (transient)"
+                await asyncio.sleep(delay)
+                continue
+            try:
+                errors = response.json()
+                detail = errors.get("errors") or errors.get("errorMessages") or errors
+            except ValueError:
+                detail = response.text[:300]
+            return PublishOutcome(
+                item_id=candidate.item_id,
+                ok=False,
+                error=f"Jira rejected the issue update ({response.status_code}): {detail}",
+                attempts=attempt,
+            )
+
+    return PublishOutcome(
+        item_id=candidate.item_id,
+        ok=False,
+        error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
+        attempts=_MAX_ATTEMPTS,
+    )
+
+
+async def add_comment(connection: JiraConnection, issue_key: str, comment_text: str) -> None:
+    """Flags an issue for reviewer attention (Issue 9.4) when its source requirement
+    was removed — a comment, never an auto-close, so a human decides what happens."""
+    async with httpx.AsyncClient(auth=connection.auth(), timeout=30) as client:
+        try:
+            response = await client.post(
+                f"{connection.base_url()}/rest/api/{connection.api_version()}/issue/{issue_key}/comment",
+                json={"body": _adf(comment_text)},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ConnectorError(f"Failed to comment on {issue_key}: {exc}") from exc
+
+
+def _adf_to_text(node: object) -> str:
+    """Best-effort plain-text extraction from Jira's ADF description format — enough
+    fidelity for drift comparison (Issue 9.5), not a full renderer."""
+    if not isinstance(node, dict):
+        return ""
+    parts: list[str] = []
+    if node.get("type") == "text":
+        parts.append(str(node.get("text", "")))
+    for child in node.get("content", []) if isinstance(node.get("content"), list) else []:
+        parts.append(_adf_to_text(child))
+    return " ".join(p for p in parts if p)
+
+
+@dataclass(frozen=True)
+class RemoteIssueState:
+    key: str
+    title: str
+    description: str
+    status: str
+
+
+async def fetch_issue(connection: JiraConnection, issue_key: str) -> RemoteIssueState:
+    """Reads current summary/description/status straight from Jira (Issue 9.5's
+    drift check) — never cached, always the live remote state."""
+    async with httpx.AsyncClient(auth=connection.auth(), timeout=30) as client:
+        try:
+            response = await client.get(
+                f"{connection.base_url()}/rest/api/{connection.api_version()}/issue/{issue_key}",
+                params={"fields": "summary,description,status"},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ConnectorError(f"Failed to fetch {issue_key}: {exc}") from exc
+    fields = response.json().get("fields", {})
+    return RemoteIssueState(
+        key=issue_key,
+        title=str(fields.get("summary", "")),
+        description=_adf_to_text(fields.get("description")),
+        status=str((fields.get("status") or {}).get("name", "")),
+    )

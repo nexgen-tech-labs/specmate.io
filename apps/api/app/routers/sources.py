@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -15,11 +15,12 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
-from app.models import Project, RawRequirement, Source, SourceKind, SourceStatus
+from app.models import Project, RawRequirement, Source, SourceDiff, SourceKind, SourceStatus
 from app.services.audit import record_audit_event
 from app.services.parsing.dedupe import dedupe_chunks
 from app.services.parsing.docx_parser import DocxParseError, parse_docx
 from app.services.parsing.pdf_parser import PdfParseError, parse_pdf
+from app.services.parsing.source_diff import diff_fragments
 from app.services.parsing.spreadsheet_parser import SpreadsheetParseError, parse_csv, parse_xlsx
 from app.services.parsing.text_parser import TextParseError, parse_text
 from app.services.parsing.types import ParsedChunk
@@ -132,7 +133,73 @@ async def _parse_one(
         after={"status": SourceStatus.PARSED.value, "chunk_count": len(chunks)},
     )
     await session.commit()
+
+    if source.previousVersionId:
+        await _compute_and_persist_diff(session, source, project)
+
     return len(chunks)
+
+
+async def _compute_and_persist_diff(session: AsyncSession, source: Source, project: Project) -> None:
+    """Issue 9.1: after a new-version Source parses successfully, diff its fresh
+    RawRequirements against the previous version's. Overwrites any prior diff row
+    for this source (re-parse of the same version recomputes, doesn't duplicate)."""
+    assert source.previousVersionId is not None
+    prev_result = await session.execute(
+        select(RawRequirement).where(
+            RawRequirement.sourceId == source.previousVersionId,
+            RawRequirement.deletedAt.is_(None),
+        )
+    )
+    previous_fragments = list(prev_result.scalars())
+
+    current_result = await session.execute(
+        select(RawRequirement).where(
+            RawRequirement.sourceId == source.id,
+            RawRequirement.deletedAt.is_(None),
+        )
+    )
+    current_fragments = list(current_result.scalars())
+
+    diff = diff_fragments(previous_fragments, current_fragments)
+
+    await session.execute(delete(SourceDiff).where(SourceDiff.sourceId == source.id))
+    session.add(
+        SourceDiff(
+            sourceId=source.id,
+            previousSourceId=source.previousVersionId,
+            addedCount=len(diff.added),
+            removedCount=len(diff.removed),
+            modifiedCount=len(diff.modified),
+            unchangedCount=len(diff.unchanged),
+            fragments=[
+                {
+                    "changeType": c.change_type,
+                    "sectionPath": c.section_path,
+                    "rawRequirementId": c.raw_requirement_id,
+                    "previousRawRequirementId": c.previous_raw_requirement_id,
+                }
+                for c in diff.all_changes
+            ],
+            createdAt=_now(),
+        )
+    )
+    record_audit_event(
+        session,
+        workspace_id=project.workspaceId,
+        project_id=project.id,
+        action="source.diffed",
+        entity_type="Source",
+        entity_id=source.id,
+        after={
+            "previous_source_id": source.previousVersionId,
+            "added": len(diff.added),
+            "removed": len(diff.removed),
+            "modified": len(diff.modified),
+            "unchanged": len(diff.unchanged),
+        },
+    )
+    await session.commit()
 
 
 class ParseSourceResponse(BaseModel):
@@ -154,6 +221,56 @@ async def parse_source(
     chunk_count = await _parse_one(source, session, blob_downloader)
     return ParseSourceResponse(
         source_id=source_id, status=SourceStatus.PARSED.value, chunk_count=chunk_count
+    )
+
+
+class FragmentChangeResponse(BaseModel):
+    change_type: str
+    section_path: str
+    raw_requirement_id: str | None
+    previous_raw_requirement_id: str | None
+
+
+class SourceDiffResponse(BaseModel):
+    source_id: str
+    previous_source_id: str
+    added_count: int
+    removed_count: int
+    modified_count: int
+    unchanged_count: int
+    fragments: list[FragmentChangeResponse]
+
+
+@router.get("/sources/{source_id}/diff")
+async def get_source_diff(
+    source_id: str,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SourceDiffResponse:
+    """Issue 9.1: the computed fragment-level diff for a new-version Source against
+    the version it supersedes. 404 if the source has no previous version or hasn't
+    been (re)parsed since being linked as a new version."""
+    result = await session.execute(select(SourceDiff).where(SourceDiff.sourceId == source_id))
+    diff = result.scalar_one_or_none()
+    if diff is None:
+        raise HTTPException(status_code=404, detail="No diff available for this source.")
+
+    fragments = diff.fragments
+    return SourceDiffResponse(
+        source_id=diff.sourceId,
+        previous_source_id=diff.previousSourceId,
+        added_count=diff.addedCount,
+        removed_count=diff.removedCount,
+        modified_count=diff.modifiedCount,
+        unchanged_count=diff.unchangedCount,
+        fragments=[
+            FragmentChangeResponse(
+                change_type=str(f["changeType"]),
+                section_path=str(f["sectionPath"]),
+                raw_requirement_id=cast(str | None, f["rawRequirementId"]),
+                previous_raw_requirement_id=cast(str | None, f["previousRawRequirementId"]),
+            )
+            for f in fragments
+        ],
     )
 
 

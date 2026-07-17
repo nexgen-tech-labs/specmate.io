@@ -20,6 +20,7 @@ from app.models import (
     GenerationRun,
     Project,
     RawRequirement,
+    Source,
     TraceLink,
 )
 from app.services.audit import record_audit_event
@@ -29,6 +30,11 @@ from app.services.ai.logging_adapter import LoggingAdapter
 from app.services.ai.prompts.generation_v1 import GENERATION_PROMPT_VERSION, REGENERATE_V1
 from app.services.generation.pipeline import GenerationError, run_generation
 from app.services.generation.schemas import REGENERATE_SCHEMA
+from app.services.generation.targeted import (
+    TargetedRegenerationError,
+    TargetedRegenerationResult,
+    run_targeted_regeneration,
+)
 
 router = APIRouter()
 
@@ -193,6 +199,44 @@ async def regenerate_item(
     )
     await session.commit()
     return RegenerateResponse(new_item_id=new_item.id, previous_item_id=item.id)
+
+
+class TargetedRegenerateBody(BaseModel):
+    workspace_id: str
+
+
+class TargetedRegenerateResponse(BaseModel):
+    revised_item_ids: list[str]
+    new_item_ids: list[str]
+    flagged_removed_item_ids: list[str]
+    untouched_fragment_count: int
+
+
+@router.post("/sources/{source_id}/targeted-regenerate")
+async def targeted_regenerate(
+    source_id: str,
+    body: TargetedRegenerateBody,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    adapter: Annotated[AIAdapter, Depends(get_generation_adapter)],
+) -> TargetedRegenerateResponse:
+    """Issue 9.2: regenerate only the DraftItems affected by this source version's
+    diff (Issue 9.1), leaving everything else in the project untouched."""
+    source = await session.get(Source, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source not found.")
+    try:
+        result: TargetedRegenerationResult = await run_targeted_regeneration(
+            source.projectId, body.workspace_id, source_id, session, adapter
+        )
+    except TargetedRegenerationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return TargetedRegenerateResponse(
+        revised_item_ids=result.revised_item_ids,
+        new_item_ids=result.new_item_ids,
+        flagged_removed_item_ids=result.flagged_removed_item_ids,
+        untouched_fragment_count=result.untouched_fragment_count,
+    )
 
 
 @router.get("/projects/{project_id}/generation-summary")

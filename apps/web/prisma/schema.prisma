@@ -351,6 +351,11 @@ model Source {
   // AV integration exists yet. INFECTED is modeled now so the schema doesn't need a follow-up
   // migration once a real scanner is wired up.
   scanStatus ScanStatus   @default(PENDING)
+  // Versioning (Issue 9.1): re-uploading over an existing Source creates a NEW Source
+  // row chained via previousVersionId, rather than overwriting — the prior version's
+  // Source + RawRequirements stay queryable/untouched. version=1 for originals.
+  version           Int     @default(1)
+  previousVersionId String?
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
   deletedAt  DateTime?
@@ -358,8 +363,31 @@ model Source {
   project          Project           @relation(fields: [projectId], references: [id])
   rawRequirements  RawRequirement[]
   traceLinks       TraceLink[]
+  previousVersion  Source?           @relation("SourceVersionChain", fields: [previousVersionId], references: [id])
+  nextVersions     Source[]          @relation("SourceVersionChain")
+  diffs            SourceDiff[]
 
   @@unique([projectId, externalRef])
+}
+
+// One row per new-version ingestion (Issue 9.1): the computed diff of this Source's
+// RawRequirements against its previousVersion's, at the fragment level. Read by
+// targeted regeneration (Issue 9.2) to scope which fragments actually changed.
+model SourceDiff {
+  id              String   @id @default(cuid())
+  sourceId        String
+  previousSourceId String
+  addedCount      Int
+  removedCount    Int
+  modifiedCount   Int
+  unchangedCount  Int
+  // [{changeType: added|removed|modified|unchanged, rawRequirementId, previousRawRequirementId, sectionPath}]
+  fragments Json
+  createdAt DateTime @default(now())
+
+  source Source @relation(fields: [sourceId], references: [id])
+
+  @@unique([sourceId])
 }
 
 model RawRequirement {
@@ -410,6 +438,9 @@ model DraftItem {
   editHistory Json?
   // Revision chain for regeneration (Issue 3.9): this item supersedes revisionOfId
   revisionOfId String?
+  // Set only by targeted regeneration (Issue 9.2) to the triggering new-version Source —
+  // the delta review queue (Issue 9.3) filters on this to show just this run's changes.
+  sourceVersionId String?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   deletedAt    DateTime?
@@ -440,11 +471,38 @@ model PublishedItem {
   targetTool  PublishTarget
   externalKey String
   externalUrl String
+  // Snapshot of {title, description, status} as SpecMate last wrote/read it —
+  // the baseline drift detection (Issue 9.5) diffs the live remote state against.
+  // Set on every create/update publish and refreshed on every drift check.
+  lastKnownState Json?
+  lastSyncedAt   DateTime?
   createdAt   DateTime      @default(now())
   deletedAt   DateTime?
 
-  draftItem  DraftItem   @relation(fields: [draftItemId], references: [id])
+  draftItem  DraftItem    @relation(fields: [draftItemId], references: [id])
   traceLinks TraceLink[]
+  driftFlags DriftFlag[]
+}
+
+// One row per detected drift (Issue 9.5): an external issue changed outside
+// SpecMate since the last publish/sync. Resolved explicitly by a reviewer —
+// SpecMate never silently overwrites the external change on its next update.
+enum DriftResolution {
+  ACCEPT_EXTERNAL
+  REASSERT_SPECMATE
+}
+
+model DriftFlag {
+  id              String           @id @default(cuid())
+  publishedItemId String
+  // What changed, e.g. {title: {before, after}, description: {before, after}, status: {before, after}}
+  diff            Json
+  detectedAt      DateTime         @default(now())
+  resolution      DriftResolution?
+  resolvedAt      DateTime?
+  resolvedByUserId String?
+
+  publishedItem PublishedItem @relation(fields: [publishedItemId], references: [id])
 }
 
 enum AuditActorType {

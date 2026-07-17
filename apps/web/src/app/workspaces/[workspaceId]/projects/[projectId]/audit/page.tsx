@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { getAccessibleProjectIds, requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { traceByExternalKey } from '@/lib/trace';
+import { DriftPanel, type DriftFlagRow } from '@/components/audit/drift-panel';
 import type { Prisma } from '@prisma/client';
 
 // Audit trail (Issue 8.3): timeline over the append-only AuditEvent log with
@@ -81,6 +82,21 @@ export default async function AuditTrailPage({
     ? await traceByExternalKey(workspaceId, filters.key, accessibleIds)
     : null;
 
+  // Open drift flags (Issue 9.5) for this project's published items.
+  const openDriftFlags = await prisma.driftFlag.findMany({
+    where: { resolution: null, publishedItem: { draftItem: { projectId } } },
+    include: { publishedItem: { include: { draftItem: { select: { title: true } } } } },
+    orderBy: { detectedAt: 'desc' },
+  });
+  const driftRows: DriftFlagRow[] = openDriftFlags.map((flag) => ({
+    id: flag.id,
+    externalKey: flag.publishedItem.externalKey,
+    tool: flag.publishedItem.targetTool,
+    itemTitle: flag.publishedItem.draftItem.title,
+    diff: flag.diff as Record<string, { before: string; after: string }>,
+    detectedAt: flag.detectedAt.toISOString(),
+  }));
+
   const base = `/workspaces/${workspaceId}/projects/${projectId}/audit`;
 
   return (
@@ -98,6 +114,8 @@ export default async function AuditTrailPage({
             Append-only log of everything that happened in {project.name} — who, what, when.
           </p>
         </div>
+
+        <DriftPanel workspaceId={workspaceId} projectId={projectId} openFlags={driftRows} />
 
         {/* External-key trace search (8.2/8.3): paste PAY-141 / AB#5 / #12. */}
         <form method="get" action={base} className="mb-6 flex gap-2">

@@ -42,9 +42,11 @@ from app.services.connectors.github_publish import (
     discover_repos,
     sort_for_hierarchy,
     suggest_file_references,
+    update_issue,
     update_issue_body,
 )
 from app.services.connectors.types import ConnectorError
+from app.services.connectors.update_detection import ExistingPublication, find_existing_publication
 
 router = APIRouter()
 
@@ -63,6 +65,7 @@ class GitHubPublishGateway:
     repos: Callable[[GitHubConnection], Awaitable[list[dict[str, str]]]] = discover_repos
     meta: Callable[[GitHubConnection, str], Awaitable[dict[str, object]]] = discover_repo_meta
     create: Callable[..., Awaitable[GitHubPublishOutcome]] = create_issue
+    update: Callable[..., Awaitable[GitHubPublishOutcome]] = update_issue
     update_body: Callable[[GitHubConnection, str, int, str], Awaitable[None]] = update_issue_body
     health: Callable[[GitHubConnection], Awaitable[dict[str, object]]] = dc_field(
         default=check_connection_health
@@ -270,6 +273,9 @@ async def publish_to_github(
     results: list[GitHubPublishItemResult] = []
     candidates = []
     child_map: dict[str, list[str]] = {}  # parent_item_id -> [child item_ids being published now]
+    # Issue 9.4: candidates whose item is a targeted-regen revision of an already-
+    # published item update that item's issue instead of creating a new one.
+    update_targets: dict[str, ExistingPublication] = {}
 
     for item_id in body.item_ids:
         item = items.get(item_id)
@@ -299,6 +305,9 @@ async def publish_to_github(
                 GitHubPublishItemResult(item_id=item_id, ok=False, error=f"{item.type.value} is not mapped for publish.")
             )
             continue
+        existing = await find_existing_publication(session, item, PublishTarget.GITHUB)
+        if existing is not None:
+            update_targets[item_id] = existing
         refs = suggest_file_references(item, file_paths) if mode == FormatMode.CODING_AGENT else None
         candidates.append(build_candidate(item, mode, item.parentId, refs))
         if item.parentId:
@@ -329,25 +338,48 @@ async def publish_to_github(
             continue
 
         assert connection is not None
-        outcome = await gateway.create(connection, mapping.remoteProject, candidate, extra_labels, milestone)
+        existing = update_targets.get(candidate.item_id)
+        if existing is not None:
+            issue_number = int(existing.external_key.removeprefix("#"))
+            outcome = await gateway.update(connection, mapping.remoteProject, issue_number, candidate)
+        else:
+            outcome = await gateway.create(connection, mapping.remoteProject, candidate, extra_labels, milestone)
 
         flags = dict(item.flags or {})
-        if outcome.ok and outcome.key and outcome.number is not None:
-            row = PublishedItem(
-                draftItemId=candidate.item_id,
-                targetTool=PublishTarget.GITHUB,
-                externalKey=outcome.key,
-                externalUrl=outcome.url or "",
-                createdAt=now,
-            )
-            session.add(row)
+        if outcome.ok and outcome.key and (outcome.number is not None or existing is not None):
+            published_row: PublishedItem
+            # Issue 9.5: snapshot what SpecMate just wrote for later drift comparison.
+            state_snapshot: dict[str, object] = {
+                "title": candidate.content.title,
+                "description": candidate.content.body_markdown,
+            }
+            if existing is not None:
+                found = await session.get(PublishedItem, existing.published_item_id)
+                assert found is not None
+                published_row = found
+                published_row.draftItemId = candidate.item_id
+                published_row.externalUrl = outcome.url or published_row.externalUrl
+                action = "draft_item.publish_updated"
+            else:
+                published_row = PublishedItem(
+                    draftItemId=candidate.item_id,
+                    targetTool=PublishTarget.GITHUB,
+                    externalKey=outcome.key,
+                    externalUrl=outcome.url or "",
+                    createdAt=now,
+                )
+                session.add(published_row)
+                action = "draft_item.published"
+            published_row.lastKnownState = state_snapshot
+            published_row.lastSyncedAt = now
             await session.flush()
             trace_rows = await session.execute(
                 select(TraceLink).where(TraceLink.draftItemId == candidate.item_id)
             )
             for trace in trace_rows.scalars():
-                trace.publishedItemId = row.id
+                trace.publishedItemId = published_row.id
                 trace.updatedAt = now
+            assert outcome.number is not None
             published[candidate.item_id] = (outcome.key, outcome.url or "", outcome.number)
             flags.pop("publishError", None)
             item.flags = flags or None
@@ -376,11 +408,12 @@ async def publish_to_github(
                 session,
                 workspace_id=workspace.id,
                 project_id=project_id,
-                action="draft_item.published",
+                action=action,
                 entity_type="DraftItem",
                 entity_id=candidate.item_id,
                 actor_user_id=body.actor_user_id,
                 actor_type=AuditActorType.USER,
+                before={"tool": "GITHUB", "key": existing.external_key} if existing else None,
                 after={"tool": "GITHUB", "key": outcome.key, "url": outcome.url},
             )
         else:

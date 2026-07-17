@@ -4,6 +4,8 @@ from app.routers import (
     ai_demo,
     billing,
     connectors,
+    drift,
+    flag_removed,
     generation,
     health,
     publish,
@@ -23,5 +25,7 @@ app.include_router(generation.router)
 app.include_router(publish.router)
 app.include_router(publish_ado.router)
 app.include_router(publish_github.router)
+app.include_router(flag_removed.router)
+app.include_router(drift.router)
 app.include_router(reports.router)
 app.include_router(billing.router)
