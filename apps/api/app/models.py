@@ -440,6 +440,18 @@ class UsagePeriod(Base):
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
 
+class ApiRateLimitCounter(Base):
+    """Per-workspace, per-minute-window request counter (Issue 12.1). One row per
+    (workspaceId, windowStart); requestCount is incremented atomically via
+    INSERT ... ON CONFLICT DO UPDATE in rate_limit.py — never read-then-write."""
+
+    __tablename__ = "ApiRateLimitCounter"
+
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"), primary_key=True)
+    windowStart: Mapped[datetime] = mapped_column(DateTime, primary_key=True)
+    requestCount: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class AtlassianConnectInstall(Base):
     """One row per Jira Cloud site with the SpecMate Connect app installed
     (Issue 10.2) — read-only from apps/api's side; apps/web's lifecycle
