@@ -14,7 +14,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import ApiRateLimitCounter, PricingTier, Project, Workspace
+from app.models import (
+    ApiRateLimitCounter,
+    DraftItem,
+    DraftItemStatus,
+    DraftItemType,
+    PricingTier,
+    Project,
+    Source,
+    SourceKind,
+    SourceStatus,
+    Workspace,
+)
 
 
 def _now() -> datetime:
@@ -50,6 +61,12 @@ async def _cleanup(ids: dict[str, str]) -> None:
     engine = create_async_engine(settings.database_url)
     try:
         async with AsyncSession(engine) as session:
+            if "source_id" in ids:
+                await session.execute(delete(Source).where(Source.id == ids["source_id"]))
+            if "draft_item_id" in ids:
+                await session.execute(
+                    delete(DraftItem).where(DraftItem.id == ids["draft_item_id"])
+                )
             await session.execute(
                 delete(ApiRateLimitCounter).where(
                     ApiRateLimitCounter.workspaceId == ids["workspace_id"]
@@ -58,6 +75,75 @@ async def _cleanup(ids: dict[str, str]) -> None:
             await session.execute(delete(Project).where(Project.id == ids["project_id"]))
             await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
             await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def _fixture_with_source(tier: PricingTier = PricingTier.STARTER) -> dict[str, str]:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            ws = Workspace(
+                name="Rate Limit MW Source Test WS",
+                pricingTier=tier,
+                createdAt=_now(),
+                updatedAt=_now(),
+            )
+            session.add(ws)
+            await session.flush()
+            project = Project(
+                workspaceId=ws.id, name="RL Source Project", createdAt=_now(), updatedAt=_now()
+            )
+            session.add(project)
+            await session.flush()
+            source = Source(
+                projectId=project.id,
+                name="RL Source",
+                kind=SourceKind.TXT,
+                status=SourceStatus.PARSED,
+                createdAt=_now(),
+                updatedAt=_now(),
+            )
+            session.add(source)
+            await session.flush()
+            ids = {"workspace_id": ws.id, "project_id": project.id, "source_id": source.id}
+            await session.commit()
+            return ids
+    finally:
+        await engine.dispose()
+
+
+async def _fixture_with_draft_item(tier: PricingTier = PricingTier.STARTER) -> dict[str, str]:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            ws = Workspace(
+                name="Rate Limit MW DraftItem Test WS",
+                pricingTier=tier,
+                createdAt=_now(),
+                updatedAt=_now(),
+            )
+            session.add(ws)
+            await session.flush()
+            project = Project(
+                workspaceId=ws.id, name="RL DraftItem Project", createdAt=_now(), updatedAt=_now()
+            )
+            session.add(project)
+            await session.flush()
+            item = DraftItem(
+                projectId=project.id,
+                type=DraftItemType.STORY,
+                title="RL Draft Item",
+                description="Fixture item for rate limit middleware test.",
+                status=DraftItemStatus.APPROVED,
+                createdAt=_now(),
+                updatedAt=_now(),
+            )
+            session.add(item)
+            await session.flush()
+            ids = {"workspace_id": ws.id, "project_id": project.id, "draft_item_id": item.id}
+            await session.commit()
+            return ids
     finally:
         await engine.dispose()
 
@@ -122,3 +208,43 @@ def test_route_with_no_workspace_or_project_param_is_not_rate_limited() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert "X-RateLimit-Limit" not in response.headers
+
+
+def test_source_scoped_route_is_rate_limited() -> None:
+    """Proves /sources/{source_id}/... resolves to a workspace via the new
+    Source.projectId -> Project.workspaceId hop and gets rate limited."""
+    ids = asyncio.run(_fixture_with_source())
+    client = TestClient(app)
+    try:
+        response = client.get(f"/sources/{ids['source_id']}/diff")
+    finally:
+        _dispose()
+        asyncio.run(_cleanup(ids))
+
+    assert response.status_code == 404  # no diff persisted -- expected, route ran
+    assert response.headers["X-RateLimit-Limit"] == "60"
+    assert response.headers["X-RateLimit-Remaining"] == "59"
+    assert "X-RateLimit-Reset" in response.headers
+
+
+def test_draft_item_scoped_route_is_rate_limited() -> None:
+    """Proves /draft-items/{item_id}/... resolves to a workspace via the new
+    DraftItem.projectId -> Project.workspaceId hop and gets rate limited."""
+    ids = asyncio.run(_fixture_with_draft_item())
+    client = TestClient(app)
+    try:
+        response = client.post(
+            f"/draft-items/{ids['draft_item_id']}/regenerate",
+            json={"context": "please regenerate", "workspace_id": ids["workspace_id"]},
+        )
+    finally:
+        _dispose()
+        asyncio.run(_cleanup(ids))
+
+    # Item fixture is APPROVED -- route rejects with 409 before touching the AI
+    # adapter, which is exactly what makes this simple to fixture, but still
+    # proves the request reached routing logic (i.e. wasn't blocked earlier).
+    assert response.status_code == 409
+    assert response.headers["X-RateLimit-Limit"] == "60"
+    assert response.headers["X-RateLimit-Remaining"] == "59"
+    assert "X-RateLimit-Reset" in response.headers

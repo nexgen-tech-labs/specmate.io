@@ -14,15 +14,19 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 
 from app.core.db import async_session_factory
 from app.core.rate_limit_config import requests_per_minute_for_tier
-from app.models import PricingTier, Project, Workspace
+from app.models import DraftItem, PricingTier, Project, Source, Workspace
 
 # Matches this codebase's real route shapes directly against request.url.path.
 # There is no /workspaces/{id} route in this app (verified against
-# apps/api/app/routers/*.py) — every rate-limited route is scoped by
-# project_id, so only that pattern is needed. Kept as its own regex (rather
-# than folded into one alternation) so a future /workspaces/{id} route can be
-# added here without disturbing the project_id resolution path.
+# apps/api/app/routers/*.py). Three route shapes are covered today:
+#   - /projects/{project_id}/...     -> Project.workspaceId directly
+#   - /sources/{source_id}/...       -> Source.projectId -> Project.workspaceId
+#   - /draft-items/{item_id}/...     -> DraftItem.projectId -> Project.workspaceId
+# Each pattern is its own regex (rather than one alternation) so future route
+# shapes can be added without disturbing existing resolution paths.
 _PROJECT_ID_PATTERN = re.compile(r"^/projects/([^/]+)")
+_SOURCE_ID_PATTERN = re.compile(r"^/sources/([^/]+)")
+_ITEM_ID_PATTERN = re.compile(r"^/draft-items/([^/]+)")
 
 
 async def increment_and_get(
@@ -56,21 +60,70 @@ async def _resolve_workspace_id(session: AsyncSession, request: Request) -> str 
     request.path_params, which is empty at this point in BaseHTTPMiddleware's
     dispatch (Starlette only populates path_params during routing, which happens
     *inside* call_next(), not before it — confirmed empirically for this repo's
-    Starlette/FastAPI versions). project_id is matched directly from the path and
-    resolved to its workspace via one DB lookup. Routes matching no known pattern
-    (health checks, etc.) are not rate-limited at all."""
+    Starlette/FastAPI versions).
+
+    Three route shapes resolve to a workspace today:
+      - /projects/{project_id}/...   one DB lookup: Project.workspaceId.
+      - /sources/{source_id}/...     two DB lookups: Source.projectId, then
+        Project.workspaceId. Covers document-parsing routes such as
+        POST /sources/{id}/parse, GET /sources/{id}/diff, and
+        POST /sources/{id}/targeted-regenerate.
+      - /draft-items/{item_id}/...   two DB lookups: DraftItem.projectId,
+        then Project.workspaceId. Covers AI-generation routes such as
+        POST /draft-items/{id}/regenerate and
+        POST /draft-items/{id}/flag-removed.
+
+    Known gaps — NOT covered, and requests to these routes are NOT rate
+    limited at all (see architecture.md for the full rationale):
+      - /drift-flags/{drift_flag_id}/resolve — would need a three-hop chain
+        (DriftFlag.publishedItemId -> PublishedItem.draftItemId ->
+        DraftItem.projectId -> Project.workspaceId), deferred as too deep
+        for this pass.
+      - /connectors/{tool}/reference-items/sync,
+        /connectors/confluence/pages/{page_id}/sync,
+        /connectors/slack/channels/{channel_id}/sync — no
+        project/workspace-scoped identifier in the URL path.
+      - /connectors/jira/health, /connectors/jira/projects,
+        /connectors/ado/health, /connectors/ado/projects,
+        /connectors/github/publish-health, /connectors/github/repos —
+        connection-health/discovery checks with no project/workspace
+        identifier in the path.
+      - /ai/demo-extract, /billing/meter-usage — no path-based identifier
+        at all.
+    Any other route matching no known pattern (health checks, etc.) is also
+    not rate-limited."""
     path = request.url.path
+
     project_match = _PROJECT_ID_PATTERN.match(path)
     if project_match:
         project = await session.get(Project, project_match.group(1))
         return project.workspaceId if project is not None else None
+
+    source_match = _SOURCE_ID_PATTERN.match(path)
+    if source_match:
+        source = await session.get(Source, source_match.group(1))
+        if source is None:
+            return None
+        project = await session.get(Project, source.projectId)
+        return project.workspaceId if project is not None else None
+
+    item_match = _ITEM_ID_PATTERN.match(path)
+    if item_match:
+        item = await session.get(DraftItem, item_match.group(1))
+        if item is None:
+            return None
+        project = await session.get(Project, item.projectId)
+        return project.workspaceId if project is not None else None
+
     return None
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Enforces per-workspace, per-minute request limits (Issue 12.1). Skips
-    requests whose URL path doesn't match a known project-scoped route shape —
-    those aren't rate-limited (e.g. health checks)."""
+    requests whose URL path doesn't match a known route shape — see
+    _resolve_workspace_id for exactly which shapes are covered and which are
+    known gaps (e.g. health checks, connector sync/discovery endpoints,
+    drift-flag resolution)."""
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint

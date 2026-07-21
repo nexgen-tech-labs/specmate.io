@@ -11,4 +11,9 @@ _LIMITS: dict[PricingTier, int] = {
 
 
 def requests_per_minute_for_tier(tier: PricingTier) -> int:
-    return _LIMITS[tier]
+    try:
+        return _LIMITS[tier]
+    except KeyError as exc:
+        raise ValueError(
+            f"No rate limit configured for pricing tier {tier!r} — add it to _LIMITS."
+        ) from exc
