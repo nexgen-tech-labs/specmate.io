@@ -45,7 +45,8 @@ from app.services.connectors.github_publish import (
     update_issue,
     update_issue_body,
 )
-from app.services.connectors.types import ConnectorError
+from app.services.connectors.transport import DirectCloudTransport
+from app.services.connectors.types import ConnectorError, ConnectorTransport
 from app.services.connectors.update_detection import ExistingPublication, find_existing_publication
 
 router = APIRouter()
@@ -66,10 +67,11 @@ class GitHubPublishGateway:
     meta: Callable[[GitHubConnection, str], Awaitable[dict[str, object]]] = discover_repo_meta
     create: Callable[..., Awaitable[GitHubPublishOutcome]] = create_issue
     update: Callable[..., Awaitable[GitHubPublishOutcome]] = update_issue
-    update_body: Callable[[GitHubConnection, str, int, str], Awaitable[None]] = update_issue_body
+    update_body: Callable[..., Awaitable[None]] = update_issue_body
     health: Callable[[GitHubConnection], Awaitable[dict[str, object]]] = dc_field(
         default=check_connection_health
     )
+    transport: ConnectorTransport = dc_field(default_factory=DirectCloudTransport)
 
 
 def get_github_gateway() -> GitHubPublishGateway:
@@ -343,7 +345,9 @@ async def publish_to_github(
             issue_number = int(existing.external_key.removeprefix("#"))
             outcome = await gateway.update(connection, mapping.remoteProject, issue_number, candidate)
         else:
-            outcome = await gateway.create(connection, mapping.remoteProject, candidate, extra_labels, milestone)
+            outcome = await gateway.create(
+                connection, mapping.remoteProject, candidate, extra_labels, milestone
+            )
 
         flags = dict(item.flags or {})
         if outcome.ok and outcome.key and (outcome.number is not None or existing is not None):
@@ -401,7 +405,9 @@ async def publish_to_github(
                     ]
                     new_body = build_body(parent_content, child_lines)
                     try:
-                        await gateway.update_body(connection, mapping.remoteProject, parent_number, new_body)
+                        await gateway.update_body(
+                            connection, mapping.remoteProject, parent_number, new_body
+                        )
                     except ConnectorError:
                         pass  # best-effort — the issue itself published fine; task list is cosmetic
             record_audit_event(

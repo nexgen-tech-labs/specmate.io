@@ -39,7 +39,8 @@ from app.services.connectors.ado_publish import (
     validate_required_fields,
 )
 from app.services.connectors.format_adapter import FormatMode
-from app.services.connectors.types import ConnectorError
+from app.services.connectors.transport import DirectCloudTransport
+from app.services.connectors.types import ConnectorError, ConnectorTransport
 from app.services.connectors.update_detection import ExistingPublication, find_existing_publication
 
 router = APIRouter()
@@ -69,6 +70,7 @@ class AdoPublishGateway:
     health: Callable[[AdoConnection], Awaitable[dict[str, object]]] = dc_field(
         default=check_connection_health
     )
+    transport: ConnectorTransport = dc_field(default_factory=DirectCloudTransport)
 
 
 def get_ado_gateway() -> AdoPublishGateway:

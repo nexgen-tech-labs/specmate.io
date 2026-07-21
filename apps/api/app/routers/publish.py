@@ -42,7 +42,8 @@ from app.services.connectors.jira_publish import (
     update_issue,
     validate_required_fields,
 )
-from app.services.connectors.types import ConnectorError
+from app.services.connectors.transport import DirectCloudTransport
+from app.services.connectors.types import ConnectorError, ConnectorTransport
 from app.services.connectors.update_detection import ExistingPublication, find_existing_publication
 
 router = APIRouter()
@@ -74,6 +75,7 @@ class PublishGateway:
     health: Callable[[JiraConnection], Awaitable[dict[str, object]]] = dc_field(
         default=check_connection_health
     )
+    transport: ConnectorTransport = dc_field(default_factory=DirectCloudTransport)
 
 
 def get_publish_gateway() -> PublishGateway:
@@ -368,7 +370,12 @@ async def publish_to_jira(
         assert connection is not None
         existing = update_targets.get(candidate.item_id)
         if existing is not None:
-            outcome = await gateway.update(connection, existing.external_key, candidate, field_defaults)
+            outcome = await gateway.update(
+                connection,
+                existing.external_key,
+                candidate,
+                field_defaults,
+            )
         else:
             outcome = await gateway.create(
                 connection,
