@@ -193,6 +193,7 @@ model Workspace {
   snapshots                 Snapshot[]
   usagePeriods              UsagePeriod[]
   atlassianConnectInstalls  AtlassianConnectInstall[]
+  apiRateLimitCounters      ApiRateLimitCounter[]
 }
 
 // One row per Jira Cloud site that has installed the SpecMate Atlassian
@@ -245,6 +246,16 @@ model UsagePeriod {
   workspace Workspace @relation(fields: [workspaceId], references: [id])
 
   @@unique([workspaceId, periodStart])
+}
+
+model ApiRateLimitCounter {
+  workspaceId  String
+  windowStart  DateTime
+  requestCount Int      @default(0)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+
+  @@id([workspaceId, windowStart])
 }
 
 model User {
