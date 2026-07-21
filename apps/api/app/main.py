@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.core.rate_limit import install_rate_limit_middleware
 from app.routers import (
     ai_demo,
     billing,
@@ -16,6 +17,8 @@ from app.routers import (
 )
 
 app = FastAPI(title="SpecMate API")
+
+install_rate_limit_middleware(app)
 
 app.include_router(health.router)
 app.include_router(ai_demo.router)
