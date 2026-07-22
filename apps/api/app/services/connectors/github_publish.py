@@ -4,7 +4,6 @@ task-list hierarchy, retry/backoff, and per-item results."""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 
 import httpx
@@ -14,9 +13,6 @@ from app.services.connectors.format_adapter import FormatMode, FormattedContent,
 from app.services.connectors.github_auth import GitHubConnection
 from app.services.connectors.transport import DirectCloudTransport
 from app.services.connectors.types import ConnectorError, ConnectorTransport
-
-_MAX_ATTEMPTS = 4
-_BACKOFF_BASE_S = 1.5
 
 # GitHub Issues has no native type hierarchy — SpecMate item type becomes a label
 # (Issue 7.3 AC), prefixed to avoid colliding with the repo's own labels.
@@ -35,6 +31,7 @@ async def discover_repos(
         response = await transport.request(
             "GET",
             f"{connection.base_url()}/user/repos",
+            target="github",
             headers=connection.headers(),
             params={"per_page": 50, "sort": "updated"},
             timeout=30,
@@ -59,12 +56,18 @@ async def discover_repo_meta(
     base = connection.base_url()
     try:
         labels_response = await transport.request(
-            "GET", f"{base}/repos/{repo}/labels", headers=connection.headers(), params={"per_page": 100}, timeout=30
+            "GET",
+            f"{base}/repos/{repo}/labels",
+            target="github",
+            headers=connection.headers(),
+            params={"per_page": 100},
+            timeout=30,
         )
         labels_response.raise_for_status()
         milestones_response = await transport.request(
             "GET",
             f"{base}/repos/{repo}/milestones",
+            target="github",
             headers=connection.headers(),
             params={"state": "open"},
             timeout=30,
@@ -76,13 +79,14 @@ async def discover_repo_meta(
     file_paths: list[str] = []
     try:
         repo_response = await transport.request(
-            "GET", f"{base}/repos/{repo}", headers=connection.headers(), timeout=30
+            "GET", f"{base}/repos/{repo}", target="github", headers=connection.headers(), timeout=30
         )
         repo_response.raise_for_status()
         default_branch = repo_response.json().get("default_branch", "main")
         tree_response = await transport.request(
             "GET",
             f"{base}/repos/{repo}/git/trees/{default_branch}",
+            target="github",
             headers=connection.headers(),
             params={"recursive": "1"},
             timeout=30,
@@ -176,8 +180,9 @@ async def create_issue(
     milestone: int | None,
     transport: ConnectorTransport = _default_transport,
 ) -> GitHubPublishOutcome:
-    """Creates one issue with secondary-rate-limit-aware retry + backoff (Issue 7.7).
-    GitHub signals rate limiting via 403 with specific headers, not just 429."""
+    """Creates one issue; retry/backoff on rate-limiting (429/5xx, or a
+    header-confirmed 403 secondary-rate-limit) is handled by the transport
+    (Issue 12.2)."""
     payload: dict[str, object] = {
         "title": candidate.content.title,
         "body": build_body(candidate.content),
@@ -186,58 +191,53 @@ async def create_issue(
     if milestone is not None:
         payload["milestone"] = milestone
 
-    last_error = "unknown"
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            response = await transport.request(
-                "POST",
-                f"{connection.base_url()}/repos/{repo}/issues",
-                headers=connection.headers(),
-                json=payload,
-                timeout=30,
-            )
-        except httpx.HTTPError as exc:
-            last_error = f"network error: {exc}"
-            await asyncio.sleep(_BACKOFF_BASE_S * attempt)
-            continue
-
-        if response.status_code == 201:
-            body = response.json()
-            return GitHubPublishOutcome(
-                item_id=candidate.item_id,
-                ok=True,
-                key=f"#{body['number']}",
-                number=body["number"],
-                url=body["html_url"],
-                attempts=attempt,
-            )
-        is_rate_limited = response.status_code == 403 and (
-            response.headers.get("X-RateLimit-Remaining") == "0"
-            or "rate limit" in response.text.lower()
-            or "secondary rate limit" in response.text.lower()
+    try:
+        response = await transport.request(
+            "POST",
+            f"{connection.base_url()}/repos/{repo}/issues",
+            target="github",
+            headers=connection.headers(),
+            json=payload,
+            timeout=30,
         )
-        if response.status_code == 429 or is_rate_limited or response.status_code >= 500:
-            retry_after = response.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else _BACKOFF_BASE_S * attempt
-            last_error = f"HTTP {response.status_code} (transient/rate-limited)"
-            await asyncio.sleep(delay)
-            continue
-        try:
-            detail = response.json()
-        except ValueError:
-            detail = response.text[:300]
+    except httpx.HTTPError as exc:
         return GitHubPublishOutcome(
             item_id=candidate.item_id,
             ok=False,
-            error=f"GitHub rejected the issue ({response.status_code}): {detail}",
-            attempts=attempt,
+            error=f"network error: {exc}",
         )
 
+    if response.status_code == 201:
+        body = response.json()
+        return GitHubPublishOutcome(
+            item_id=candidate.item_id,
+            ok=True,
+            key=f"#{body['number']}",
+            number=body["number"],
+            url=body["html_url"],
+        )
+    if response.status_code == 429 or response.status_code >= 500:
+        # Transport already retried per GITHUB_POLICY and gave up -- this is the
+        # final failed response, not a first attempt.
+        return GitHubPublishOutcome(
+            item_id=candidate.item_id,
+            ok=False,
+            error=f"Gave up after retries — last error: HTTP {response.status_code} (transient)",
+        )
+    # A 403 reaching here was either a permanent permissions error (transport
+    # never treated it as rate-limited) or a rate limit the transport already
+    # retried and gave up on -- either way it's not safely re-describable as
+    # "transient" without re-checking headers the connector no longer owns, so
+    # it falls through to the generic rejection message below like any other
+    # permanent 4xx.
+    try:
+        detail = response.json()
+    except ValueError:
+        detail = response.text[:300]
     return GitHubPublishOutcome(
         item_id=candidate.item_id,
         ok=False,
-        error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
-        attempts=_MAX_ATTEMPTS,
+        error=f"GitHub rejected the issue ({response.status_code}): {detail}",
     )
 
 
@@ -254,6 +254,7 @@ async def update_issue_body(
         response = await transport.request(
             "PATCH",
             f"{connection.base_url()}/repos/{repo}/issues/{issue_number}",
+            target="github",
             headers=connection.headers(),
             json={"body": body},
             timeout=30,
@@ -271,53 +272,52 @@ async def update_issue(
     transport: ConnectorTransport = _default_transport,
 ) -> GitHubPublishOutcome:
     """Updates title/body on an already-published issue (Issue 9.4) — labels and
-    milestone are set once at creation and not touched by a source-content update."""
-    last_error = "unknown"
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            response = await transport.request(
-                "PATCH",
-                f"{connection.base_url()}/repos/{repo}/issues/{issue_number}",
-                headers=connection.headers(),
-                json={"title": candidate.content.title, "body": candidate.content.body_markdown},
-                timeout=30,
-            )
-        except httpx.HTTPError as exc:
-            last_error = f"network error: {exc}"
-            await asyncio.sleep(_BACKOFF_BASE_S * attempt)
-            continue
-
-        if response.status_code == 200:
-            return GitHubPublishOutcome(
-                item_id=candidate.item_id,
-                ok=True,
-                key=f"#{issue_number}",
-                url=str(response.json().get("html_url", "")),
-                number=issue_number,
-                attempts=attempt,
-            )
-        if response.status_code == 403 or response.status_code == 429 or response.status_code >= 500:
-            retry_after = response.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else _BACKOFF_BASE_S * attempt
-            last_error = f"HTTP {response.status_code} (transient)"
-            await asyncio.sleep(delay)
-            continue
-        try:
-            detail = response.json()
-        except ValueError:
-            detail = response.text[:300]
+    milestone are set once at creation and not touched by a source-content update.
+    Retry/backoff on rate-limiting is handled by the transport (Issue 12.2); unlike
+    the pre-refactor version of this function, a 403 is no longer treated as
+    unconditionally transient here -- the transport only retries a 403 when
+    GitHub's own headers confirm a secondary rate limit, so a genuine permission
+    error now correctly surfaces as a permanent failure instead of being retried."""
+    try:
+        response = await transport.request(
+            "PATCH",
+            f"{connection.base_url()}/repos/{repo}/issues/{issue_number}",
+            target="github",
+            headers=connection.headers(),
+            json={"title": candidate.content.title, "body": candidate.content.body_markdown},
+            timeout=30,
+        )
+    except httpx.HTTPError as exc:
         return GitHubPublishOutcome(
             item_id=candidate.item_id,
             ok=False,
-            error=f"GitHub rejected the issue update ({response.status_code}): {detail}",
-            attempts=attempt,
+            error=f"network error: {exc}",
         )
 
+    if response.status_code == 200:
+        return GitHubPublishOutcome(
+            item_id=candidate.item_id,
+            ok=True,
+            key=f"#{issue_number}",
+            url=str(response.json().get("html_url", "")),
+            number=issue_number,
+        )
+    if response.status_code == 429 or response.status_code >= 500:
+        # Transport already retried per GITHUB_POLICY and gave up -- this is the
+        # final failed response, not a first attempt.
+        return GitHubPublishOutcome(
+            item_id=candidate.item_id,
+            ok=False,
+            error=f"Gave up after retries — last error: HTTP {response.status_code} (transient)",
+        )
+    try:
+        detail = response.json()
+    except ValueError:
+        detail = response.text[:300]
     return GitHubPublishOutcome(
         item_id=candidate.item_id,
         ok=False,
-        error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
-        attempts=_MAX_ATTEMPTS,
+        error=f"GitHub rejected the issue update ({response.status_code}): {detail}",
     )
 
 
@@ -334,6 +334,7 @@ async def add_comment(
         response = await transport.request(
             "POST",
             f"{connection.base_url()}/repos/{repo}/issues/{issue_number}/comments",
+            target="github",
             headers=connection.headers(),
             json={"body": comment_text},
             timeout=30,
@@ -363,6 +364,7 @@ async def fetch_issue(
         response = await transport.request(
             "GET",
             f"{connection.base_url()}/repos/{repo}/issues/{issue_number}",
+            target="github",
             headers=connection.headers(),
             timeout=30,
         )
