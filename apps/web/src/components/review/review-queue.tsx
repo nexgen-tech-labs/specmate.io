@@ -192,7 +192,7 @@ export function ReviewQueue({
 
   return (
     <div>
-      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs" data-tour="review-toolbar">
         <Link
           href={filterLink('flagged', activeFilters.flagged === '1' ? null : '1')}
           className={`rounded border px-2 py-1 ${activeFilters.flagged === '1' ? 'border-cobalt text-cobalt' : 'border-line text-sub'}`}
@@ -264,7 +264,7 @@ export function ReviewQueue({
       {error ? <p className="mb-3 text-sm text-red">{error}</p> : null}
       {items.length === 0 ? <p className="text-sm text-sub">No items match this filter.</p> : null}
 
-      <ul className="space-y-2">
+      <ul className="space-y-2" data-tour="review-item-list">
         {items.map((item) => {
           const open = openId === item.id;
           return (
