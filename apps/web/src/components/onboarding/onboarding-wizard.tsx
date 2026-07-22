@@ -116,7 +116,7 @@ export function OnboardingWizard({
       ) : null}
 
       {step === 'connect' ? (
-        <div className="rounded-lg border border-line bg-panel p-8">
+        <div data-tour="wizard-step-connect" className="rounded-lg border border-line bg-panel p-8">
           <h2 className="text-lg font-semibold text-ink">Connect a tool (optional)</h2>
           <p className="mt-2 text-sm text-sub">
             Connecting Jira, Azure DevOps, or GitHub lets SpecMate detect duplicates against your
@@ -166,7 +166,7 @@ export function OnboardingWizard({
       ) : null}
 
       {step === 'upload' ? (
-        <div className="rounded-lg border border-line bg-panel p-8">
+        <div data-tour="wizard-step-upload" className="rounded-lg border border-line bg-panel p-8">
           <h2 className="text-lg font-semibold text-ink">Upload a source</h2>
           <p className="mt-2 text-sm text-sub">
             A requirements doc, backlog export, or meeting transcript — docx, pdf, xlsx, csv, or
@@ -214,7 +214,10 @@ export function OnboardingWizard({
       ) : null}
 
       {step === 'generate' ? (
-        <div className="rounded-lg border border-line bg-panel p-8 text-center">
+        <div
+          data-tour="wizard-step-generate"
+          className="rounded-lg border border-line bg-panel p-8 text-center"
+        >
           <h2 className="text-lg font-semibold text-ink">Ready to generate</h2>
           <p className="mt-2 text-sm text-sub">
             SpecMate will read your source and draft epics, stories, tasks, and acceptance criteria
