@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { getAccessibleProjectIds, requireWorkspaceRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { NewProjectForm } from '@/components/workspace/new-project-form';
+import { TakeTourButton } from '@/components/tour/take-tour-button';
 import { orgSizeLabel } from '@/lib/org-size';
 
 // Workspace dashboard (Issue 10.10) — the landing page after signup/login.
@@ -59,22 +60,25 @@ export default async function WorkspaceDashboardPage({
             <h1 className="text-3xl font-bold tracking-tight text-ink">{workspace.name}</h1>
             <p className="mt-2 text-base text-sub">Your projects</p>
           </div>
-          {access.membership.role === 'ADMIN' ? (
-            <div className="flex flex-col items-end gap-1">
-              <Link
-                href={`/workspaces/${workspaceId}/invite`}
-                className="text-sm text-cobalt underline-offset-2 hover:underline"
-              >
-                Invite teammate →
-              </Link>
-              <Link
-                href={`/workspaces/${workspaceId}/billing`}
-                className="text-sm text-cobalt underline-offset-2 hover:underline"
-              >
-                Billing →
-              </Link>
-            </div>
-          ) : null}
+          <div className="flex flex-col items-end gap-1">
+            <TakeTourButton />
+            {access.membership.role === 'ADMIN' ? (
+              <>
+                <Link
+                  href={`/workspaces/${workspaceId}/invite`}
+                  className="text-sm text-cobalt underline-offset-2 hover:underline"
+                >
+                  Invite teammate →
+                </Link>
+                <Link
+                  href={`/workspaces/${workspaceId}/billing`}
+                  className="text-sm text-cobalt underline-offset-2 hover:underline"
+                >
+                  Billing →
+                </Link>
+              </>
+            ) : null}
+          </div>
         </div>
 
         {projects.length === 0 ? (
@@ -85,7 +89,7 @@ export default async function WorkspaceDashboardPage({
               items — usually under 15 minutes.
             </p>
             {canCreate ? (
-              <div className="mt-6">
+              <div data-tour="new-project-form" className="mt-6">
                 <NewProjectForm workspaceId={workspaceId} redirectToWizard />
               </div>
             ) : null}
@@ -109,7 +113,7 @@ export default async function WorkspaceDashboardPage({
               ))}
             </ul>
             {canCreate ? (
-              <div className="mt-6">
+              <div data-tour="new-project-form" className="mt-6">
                 <NewProjectForm workspaceId={workspaceId} />
               </div>
             ) : null}
