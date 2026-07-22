@@ -4,7 +4,6 @@ hierarchy-aware ordering, retry/backoff, and per-item results."""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 
 import httpx
@@ -12,9 +11,6 @@ import httpx
 from app.services.connectors.jira_auth import JiraConnection
 from app.services.connectors.transport import DirectCloudTransport
 from app.services.connectors.types import ConnectorError, ConnectorTransport
-
-_MAX_ATTEMPTS = 4
-_BACKOFF_BASE_S = 1.5
 
 _default_transport = DirectCloudTransport()
 
@@ -29,6 +25,7 @@ async def discover_projects(
         response = await transport.request(
             "GET",
             f"{connection.base_url()}/rest/api/{connection.api_version()}/project/search",
+            target="jira",
             auth=connection.auth(),
             timeout=30,
         )
@@ -51,13 +48,18 @@ async def discover_project_meta(
     issue_types: list[dict[str, object]] = []
     try:
         types_response = await transport.request(
-            "GET", f"{base}/issue/createmeta/{project_key}/issuetypes", auth=connection.auth(), timeout=30
+            "GET",
+            f"{base}/issue/createmeta/{project_key}/issuetypes",
+            target="jira",
+            auth=connection.auth(),
+            timeout=30,
         )
         types_response.raise_for_status()
         for issue_type in types_response.json().get("issueTypes", []):
             fields_response = await transport.request(
                 "GET",
                 f"{base}/issue/createmeta/{project_key}/issuetypes/{issue_type['id']}",
+                target="jira",
                 auth=connection.auth(),
                 timeout=30,
             )
@@ -206,54 +208,48 @@ async def create_issue(
         # Server/DC epic-link differences are documented in jira_auth.py (Issue 5.8).
         payload.fields["parent"] = {"key": parent_key}
 
-    last_error = "unknown"
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            response = await transport.request(
-                "POST",
-                f"{connection.base_url()}/rest/api/{connection.api_version()}/issue",
-                auth=connection.auth(),
-                json={"fields": payload.fields},
-                timeout=30,
-            )
-        except httpx.HTTPError as exc:
-            last_error = f"network error: {exc}"
-            await asyncio.sleep(_BACKOFF_BASE_S * attempt)
-            continue
-
-        if response.status_code in (200, 201):
-            body = response.json()
-            return PublishOutcome(
-                item_id=candidate.item_id,
-                ok=True,
-                key=body["key"],
-                url=f"{connection.base_url()}/browse/{body['key']}",
-                attempts=attempt,
-            )
-        if response.status_code == 429 or response.status_code >= 500:
-            retry_after = response.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else _BACKOFF_BASE_S * attempt
-            last_error = f"HTTP {response.status_code} (transient)"
-            await asyncio.sleep(delay)
-            continue
-        # Permanent 4xx: surface Jira's specific field errors immediately.
-        try:
-            errors = response.json()
-            detail = errors.get("errors") or errors.get("errorMessages") or errors
-        except ValueError:
-            detail = response.text[:300]
+    try:
+        response = await transport.request(
+            "POST",
+            f"{connection.base_url()}/rest/api/{connection.api_version()}/issue",
+            target="jira",
+            auth=connection.auth(),
+            json={"fields": payload.fields},
+            timeout=30,
+        )
+    except httpx.HTTPError as exc:
         return PublishOutcome(
             item_id=candidate.item_id,
             ok=False,
-            error=f"Jira rejected the issue ({response.status_code}): {detail}",
-            attempts=attempt,
+            error=f"network error: {exc}",
         )
 
+    if response.status_code in (200, 201):
+        body = response.json()
+        return PublishOutcome(
+            item_id=candidate.item_id,
+            ok=True,
+            key=body["key"],
+            url=f"{connection.base_url()}/browse/{body['key']}",
+        )
+    if response.status_code == 429 or response.status_code >= 500:
+        # Transport already retried per JIRA_POLICY and gave up -- this is the
+        # final failed response, not a first attempt.
+        return PublishOutcome(
+            item_id=candidate.item_id,
+            ok=False,
+            error=f"Gave up after retries — last error: HTTP {response.status_code} (transient)",
+        )
+    # Permanent 4xx: surface Jira's specific field errors immediately.
+    try:
+        errors = response.json()
+        detail = errors.get("errors") or errors.get("errorMessages") or errors
+    except ValueError:
+        detail = response.text[:300]
     return PublishOutcome(
         item_id=candidate.item_id,
         ok=False,
-        error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
-        attempts=_MAX_ATTEMPTS,
+        error=f"Jira rejected the issue ({response.status_code}): {detail}",
     )
 
 
@@ -276,52 +272,46 @@ async def update_issue(
         **field_defaults,
     }
 
-    last_error = "unknown"
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            response = await transport.request(
-                "PUT",
-                f"{connection.base_url()}/rest/api/{connection.api_version()}/issue/{issue_key}",
-                auth=connection.auth(),
-                json={"fields": fields},
-                timeout=30,
-            )
-        except httpx.HTTPError as exc:
-            last_error = f"network error: {exc}"
-            await asyncio.sleep(_BACKOFF_BASE_S * attempt)
-            continue
-
-        if response.status_code in (200, 204):
-            return PublishOutcome(
-                item_id=candidate.item_id,
-                ok=True,
-                key=issue_key,
-                url=f"{connection.base_url()}/browse/{issue_key}",
-                attempts=attempt,
-            )
-        if response.status_code == 429 or response.status_code >= 500:
-            retry_after = response.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else _BACKOFF_BASE_S * attempt
-            last_error = f"HTTP {response.status_code} (transient)"
-            await asyncio.sleep(delay)
-            continue
-        try:
-            errors = response.json()
-            detail = errors.get("errors") or errors.get("errorMessages") or errors
-        except ValueError:
-            detail = response.text[:300]
+    try:
+        response = await transport.request(
+            "PUT",
+            f"{connection.base_url()}/rest/api/{connection.api_version()}/issue/{issue_key}",
+            target="jira",
+            auth=connection.auth(),
+            json={"fields": fields},
+            timeout=30,
+        )
+    except httpx.HTTPError as exc:
         return PublishOutcome(
             item_id=candidate.item_id,
             ok=False,
-            error=f"Jira rejected the issue update ({response.status_code}): {detail}",
-            attempts=attempt,
+            error=f"network error: {exc}",
         )
 
+    if response.status_code in (200, 204):
+        return PublishOutcome(
+            item_id=candidate.item_id,
+            ok=True,
+            key=issue_key,
+            url=f"{connection.base_url()}/browse/{issue_key}",
+        )
+    if response.status_code == 429 or response.status_code >= 500:
+        # Transport already retried per JIRA_POLICY and gave up -- this is the
+        # final failed response, not a first attempt.
+        return PublishOutcome(
+            item_id=candidate.item_id,
+            ok=False,
+            error=f"Gave up after retries — last error: HTTP {response.status_code} (transient)",
+        )
+    try:
+        errors = response.json()
+        detail = errors.get("errors") or errors.get("errorMessages") or errors
+    except ValueError:
+        detail = response.text[:300]
     return PublishOutcome(
         item_id=candidate.item_id,
         ok=False,
-        error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
-        attempts=_MAX_ATTEMPTS,
+        error=f"Jira rejected the issue update ({response.status_code}): {detail}",
     )
 
 
@@ -337,6 +327,7 @@ async def add_comment(
         response = await transport.request(
             "POST",
             f"{connection.base_url()}/rest/api/{connection.api_version()}/issue/{issue_key}/comment",
+            target="jira",
             auth=connection.auth(),
             json={"body": _adf(comment_text)},
             timeout=30,
@@ -378,6 +369,7 @@ async def fetch_issue(
         response = await transport.request(
             "GET",
             f"{connection.base_url()}/rest/api/{connection.api_version()}/issue/{issue_key}",
+            target="jira",
             auth=connection.auth(),
             params={"fields": "summary,description,status"},
             timeout=30,
