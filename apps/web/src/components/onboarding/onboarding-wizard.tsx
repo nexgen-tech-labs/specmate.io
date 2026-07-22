@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { UploadZone } from '@/components/sources/upload-zone';
+import { useTour } from '@/components/tour/tour-provider';
 
 type StepKey = 'connect' | 'upload' | 'generate' | 'done';
 
@@ -27,14 +28,37 @@ export function OnboardingWizard({
   projectName,
   hasConnectedTool,
   hasSource,
+  onStepChange,
+  tourAdvanceSignal,
 }: {
   workspaceId: string;
   projectId: string;
   projectName: string;
   hasConnectedTool: boolean;
   hasSource: boolean;
+  /** Called whenever the wizard's own internal step changes, including once
+   * on mount with the real starting step (which may not be 'connect' — see
+   * the `step` initializer below). Lets an external listener (the tour)
+   * mirror the wizard's true state instead of tracking it independently.
+   * Optional and only meant for tests — normal usage wires this to the tour
+   * automatically via useTour() below. */
+  onStepChange?: (step: StepKey) => void;
+  /** Bump this value (e.g. a counter) to make the wizard perform its own
+   * real "primary action" for whatever step it's currently on — skip,
+   * continue, or generate — matching what the corresponding button does.
+   * Only fires on actual increments (tracked via a ref), not every render.
+   * Optional and only meant for tests — normal usage wires this to the tour
+   * automatically via useTour() below. */
+  tourAdvanceSignal?: number;
 }) {
   const router = useRouter();
+  // The tour is always mounted globally (root layout), so this hook is
+  // always safely callable. The sync logic below only does anything when a
+  // wizard tour step is actually active (activeStepId indicates one), so
+  // normal non-tour usage of this wizard is unaffected.
+  const { syncWizardStep, wizardAdvanceSignal } = useTour();
+  const effectiveOnStepChange = onStepChange ?? syncWizardStep;
+  const effectiveTourAdvanceSignal = tourAdvanceSignal ?? wizardAdvanceSignal;
   const [connected, setConnected] = useState(hasConnectedTool);
   const [uploadedSourceId, setUploadedSourceId] = useState<string | null>(null);
   const [parseStatus, setParseStatus] = useState<string | null>(hasSource ? 'PARSED' : null);
@@ -43,6 +67,11 @@ export function OnboardingWizard({
   const [itemCount, setItemCount] = useState<number | null>(null);
   const [step, setStep] = useState<StepKey>(connected || hasSource ? 'upload' : 'connect');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    effectiveOnStepChange?.(step);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
 
   // Poll the just-uploaded source until parsing finishes (or fails) — the
   // synchronous parse endpoint (Issue #8/#9) usually completes in well under a
@@ -81,6 +110,36 @@ export function OnboardingWizard({
   }
 
   const canGenerate = parseStatus === 'PARSED';
+
+  // When the tour's "Next →" button is clicked while a wizard step is
+  // active, TourProvider bumps tourAdvanceSignal instead of trying to drive
+  // the wizard's UI directly. In response, the wizard performs its own real
+  // primary action for whatever step it's currently on — the same logic the
+  // corresponding on-screen button already calls. A ref tracks the previous
+  // signal value so this only fires on actual increments, not every render.
+  const prevTourAdvanceSignal = useRef(effectiveTourAdvanceSignal);
+  useEffect(() => {
+    if (effectiveTourAdvanceSignal === undefined) return;
+    if (prevTourAdvanceSignal.current === effectiveTourAdvanceSignal) return;
+    prevTourAdvanceSignal.current = effectiveTourAdvanceSignal;
+
+    // This effect exists specifically to subscribe to an external signal
+    // (the tour's "Next →" button, via tourAdvanceSignal) and react to it by
+    // driving this component's own state — the documented exception to
+    // "don't setState in an effect" (https://react.dev/learn/you-might-not-need-an-effect).
+    if (step === 'connect') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setStep('upload');
+    } else if (step === 'upload') {
+      if (canGenerate) {
+        setStep('generate');
+      }
+      // else: no safe programmatic action — the user must upload themselves.
+    } else if (step === 'generate') {
+      void triggerGenerate();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveTourAdvanceSignal]);
 
   return (
     <div className="mt-8">

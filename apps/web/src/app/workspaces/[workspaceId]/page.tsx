@@ -61,7 +61,7 @@ export default async function WorkspaceDashboardPage({
             <p className="mt-2 text-base text-sub">Your projects</p>
           </div>
           <div className="flex flex-col items-end gap-1">
-            <TakeTourButton />
+            {canCreate ? <TakeTourButton /> : null}
             {access.membership.role === 'ADMIN' ? (
               <>
                 <Link
