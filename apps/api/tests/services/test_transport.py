@@ -245,6 +245,60 @@ async def test_direct_cloud_transport_falls_back_to_computed_backoff_on_http_dat
     assert call_count == 2
 
 
+async def test_direct_cloud_transport_retries_on_network_error_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(201, json={"ok": True})
+
+    mock_transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        httpx, "AsyncClient", partial(httpx.AsyncClient, transport=mock_transport)
+    )
+
+    transport = DirectCloudTransport()
+    response = await transport.request(
+        "POST", "https://example.atlassian.net/rest/api/3/issue", target="jira"
+    )
+
+    assert response.status_code == 201
+    assert call_count == 2
+
+
+async def test_direct_cloud_transport_reraises_network_error_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        raise httpx.ConnectError("connection reset", request=request)
+
+    mock_transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        httpx, "AsyncClient", partial(httpx.AsyncClient, transport=mock_transport)
+    )
+
+    transport = DirectCloudTransport()
+    with pytest.raises(httpx.ConnectError):
+        await transport.request(
+            "POST", "https://example.atlassian.net/rest/api/3/issue", target="jira"
+        )
+
+    # Exhausts the policy's max attempts before giving up -- mirrors the
+    # 429/5xx give-up path, just re-raising instead of returning a response
+    # (since there's no response to return), for the caller's existing
+    # except httpx.HTTPError block to convert into a PublishOutcome.
+    assert call_count == JIRA_POLICY.max_attempts
+
+
 async def test_direct_cloud_transport_paces_requests_to_the_same_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

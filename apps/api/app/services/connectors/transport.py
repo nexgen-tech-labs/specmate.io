@@ -116,8 +116,21 @@ class DirectCloudTransport:
         response: httpx.Response | None = None
         for attempt in range(1, policy.max_attempts + 1):
             await self._pace(target)
-            async with httpx.AsyncClient(auth=auth, headers=headers, timeout=timeout) as client:
-                response = await client.request(method, url, json=json, params=params)
+            try:
+                async with httpx.AsyncClient(
+                    auth=auth, headers=headers, timeout=timeout
+                ) as client:
+                    response = await client.request(method, url, json=json, params=params)
+            except httpx.HTTPError:
+                # Network-level failure (connection reset, DNS failure, timeout, ...)
+                # raises as an exception rather than returning a response, unlike
+                # 429/5xx which are handled below. Pre-refactor, every per-connector
+                # retry loop retried on this too -- mirror that here so centralizing
+                # the retry logic doesn't silently drop network-error retries.
+                if attempt == policy.max_attempts:
+                    raise
+                await asyncio.sleep(policy.backoff_base_s * attempt)
+                continue
 
             if not _is_rate_limited(target, response):
                 return response
