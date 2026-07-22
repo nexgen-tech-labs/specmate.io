@@ -37,7 +37,9 @@ class ConnectorTransport(Protocol):
     `on_rate_limited`, if provided, is awaited once per retry-triggering response
     (never on the final give-up) — lets a caller with workspace/DB context (the
     publish routers) record an incident without the transport itself knowing
-    about audit logging.
+    about audit logging. Called with (status_code, wait_seconds, attempt) — attempt
+    is the retry loop's current 1-indexed attempt number, so callers can capture how
+    many tries had elapsed when this incident happened.
     """
 
     async def request(
@@ -51,7 +53,7 @@ class ConnectorTransport(Protocol):
         json: object | None = None,
         params: dict[str, str | int] | None = None,
         timeout: float = 30,
-        on_rate_limited: Callable[[int, float], Awaitable[None]] | None = None,
+        on_rate_limited: Callable[[int, float, int], Awaitable[None]] | None = None,
     ) -> httpx.Response: ...
 
 

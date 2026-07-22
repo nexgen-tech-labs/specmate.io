@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -14,6 +15,7 @@ from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
 from app.models import (
+    AuditEvent,
     DraftItem,
     Project,
     PublishedItem,
@@ -85,6 +87,7 @@ class _FakeJira:
             candidate: PublishCandidate,
             parent_key: str | None,
             _defaults: dict[str, object],
+            **_kwargs: object,
         ) -> PublishOutcome:
             self.counter += 1
             key = f"{project_key}-{100 + self.counter}"
@@ -105,6 +108,7 @@ class _FakeJira:
             issue_key: str,
             candidate: PublishCandidate,
             _defaults: dict[str, object],
+            **_kwargs: object,
         ) -> PublishOutcome:
             self.updated.append({"key": issue_key, "title": candidate.title})
             return PublishOutcome(
@@ -402,6 +406,73 @@ def test_two_stage_workspace_requires_signoff_before_publish() -> None:
     result = response.json()["results"][0]
     assert result["ok"] is False and "sign-off" in result["error"]
     assert fake.created == []
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_rate_limit_incident_during_publish_records_audit_event() -> None:
+    """Issue #89 (Task 5): create() invoking its on_rate_limited callback (as the
+    transport does on each retry-triggering 429/5xx) results in a connector.rate_
+    limited AuditEvent for the workspace, even though the publish itself succeeds."""
+    ids = asyncio.run(_fixture())
+    fake = _FakeJira()
+    gateway = fake.gateway()
+
+    async def rate_limited_create(
+        _conn: object,
+        project_key: str,
+        issue_type: str,
+        candidate: PublishCandidate,
+        parent_key: str | None,
+        _defaults: dict[str, object],
+        **kwargs: object,
+    ) -> PublishOutcome:
+        on_rate_limited = kwargs.get("on_rate_limited")
+        assert callable(on_rate_limited)
+        callback: Callable[[int, float, int], Awaitable[None]] = on_rate_limited
+        await callback(429, 1.5, 1)
+        fake.counter += 1
+        key = f"{project_key}-{100 + fake.counter}"
+        fake.created.append({"key": key, "type": issue_type, "title": candidate.title, "parent": parent_key})
+        return PublishOutcome(item_id=candidate.item_id, ok=True, key=key, url=f"https://x/browse/{key}")
+
+    gateway.create = rate_limited_create
+
+    app.dependency_overrides[get_publish_gateway] = lambda: gateway
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        response = client.post(
+            f"/projects/{ids['project_id']}/publish/jira", json={"item_ids": [ids["epic_id"]]}
+        )
+    finally:
+        app.dependency_overrides.pop(get_publish_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["succeeded"] == 1 and body["failed"] == 0
+
+    async def check_audit_event() -> AuditEvent | None:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                return (
+                    await session.execute(
+                        select(AuditEvent).where(
+                            AuditEvent.workspaceId == ids["workspace_id"],
+                            AuditEvent.action == "connector.rate_limited",
+                        )
+                    )
+                ).scalar_one_or_none()
+        finally:
+            await engine.dispose()
+
+    event = asyncio.run(check_audit_event())
+    assert event is not None
+    assert event.entityType == "jira"
+    assert event.metadata_ == {"status_code": 429, "wait_seconds": 1.5, "retry_count": 1}
 
     asyncio.run(_cleanup(ids))
 

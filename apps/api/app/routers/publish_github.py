@@ -26,7 +26,7 @@ from app.models import (
     TraceLink,
     Workspace,
 )
-from app.services.audit import record_audit_event
+from app.services.audit import make_rate_limit_recorder, record_audit_event
 from app.services.connectors.format_adapter import FormatMode
 from app.services.connectors.github_auth import (
     GitHubConnection,
@@ -50,6 +50,7 @@ from app.services.connectors.types import ConnectorError, ConnectorTransport
 from app.services.connectors.update_detection import ExistingPublication, find_existing_publication
 
 router = APIRouter()
+
 
 # GitHub has no native type hierarchy — every SpecMate type maps to "issue" plus a
 # label (github_publish.LABEL_PREFIX); this map is really "should this type publish
@@ -343,10 +344,23 @@ async def publish_to_github(
         existing = update_targets.get(candidate.item_id)
         if existing is not None:
             issue_number = int(existing.external_key.removeprefix("#"))
-            outcome = await gateway.update(connection, mapping.remoteProject, issue_number, candidate)
+            outcome = await gateway.update(
+                connection,
+                mapping.remoteProject,
+                issue_number,
+                candidate,
+                transport=gateway.transport,
+                on_rate_limited=make_rate_limit_recorder(session, workspace.id, "github"),
+            )
         else:
             outcome = await gateway.create(
-                connection, mapping.remoteProject, candidate, extra_labels, milestone
+                connection,
+                mapping.remoteProject,
+                candidate,
+                extra_labels,
+                milestone,
+                transport=gateway.transport,
+                on_rate_limited=make_rate_limit_recorder(session, workspace.id, "github"),
             )
 
         flags = dict(item.flags or {})

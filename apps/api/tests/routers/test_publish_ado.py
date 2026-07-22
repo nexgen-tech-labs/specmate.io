@@ -4,6 +4,7 @@ override (mirrors test_publish.py's Jira pattern)."""
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import DraftItem, Project, PublishedItem, PublishMapping, TraceLink, Workspace
+from app.models import AuditEvent, DraftItem, Project, PublishedItem, PublishMapping, TraceLink, Workspace
 from app.routers.publish_ado import AdoPublishGateway, get_ado_gateway
 from app.services.connectors.ado_auth import PatConnection
 from app.services.connectors.ado_publish import AdoPublishCandidate, AdoPublishOutcome
@@ -53,6 +54,7 @@ class _FakeAdo:
             _area: str | None,
             _iteration: str | None,
             _defaults: dict[str, object],
+            **_kwargs: object,
         ) -> AdoPublishOutcome:
             self.counter += 1
             wid = 100 + self.counter
@@ -66,6 +68,7 @@ class _FakeAdo:
             work_item_id: int,
             candidate: AdoPublishCandidate,
             _defaults: dict[str, object],
+            **_kwargs: object,
         ) -> AdoPublishOutcome:
             self.updated.append({"id": work_item_id, "title": candidate.content.title})
             return AdoPublishOutcome(
@@ -366,5 +369,76 @@ def test_publishing_a_targeted_regen_revision_updates_not_duplicates() -> None:
             await engine.dispose()
 
     assert asyncio.run(check_single_published_row()) == 1
+
+
+def test_rate_limit_incident_during_publish_records_audit_event() -> None:
+    """Issue #89 (Task 5): create() invoking its on_rate_limited callback (as the
+    transport does on each retry-triggering 429/5xx) results in a connector.rate_
+    limited AuditEvent for the workspace, even though the publish itself succeeds."""
+    ids = asyncio.run(_fixture())
+    fake = _FakeAdo()
+    gateway = fake.gateway()
+
+    async def rate_limited_create(
+        _conn: object,
+        _project: str,
+        work_item_type: str,
+        candidate: AdoPublishCandidate,
+        parent_url: str | None,
+        _area: str | None,
+        _iteration: str | None,
+        _defaults: dict[str, object],
+        **kwargs: object,
+    ) -> AdoPublishOutcome:
+        on_rate_limited = kwargs.get("on_rate_limited")
+        assert callable(on_rate_limited)
+        callback: Callable[[int, float, int], Awaitable[None]] = on_rate_limited
+        await callback(429, 1.5, 1)
+        fake.counter += 1
+        wid = 100 + fake.counter
+        fake.created.append({"id": wid, "type": work_item_type, "parent_url": parent_url})
+        return AdoPublishOutcome(
+            item_id=candidate.item_id, ok=True, key=f"AB#{wid}", url=f"https://x/_workitems/edit/{wid}"
+        )
+
+    gateway.create = rate_limited_create
+
+    app.dependency_overrides[get_ado_gateway] = lambda: gateway
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        response = client.post(
+            f"/projects/{ids['project_id']}/publish/ado", json={"item_ids": [ids["epic_id"]]}
+        )
+    finally:
+        app.dependency_overrides.pop(get_ado_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["succeeded"] == 1 and body["failed"] == 0
+
+    async def check_audit_event() -> AuditEvent | None:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                return (
+                    await session.execute(
+                        select(AuditEvent).where(
+                            AuditEvent.workspaceId == ids["workspace_id"],
+                            AuditEvent.action == "connector.rate_limited",
+                        )
+                    )
+                ).scalar_one_or_none()
+        finally:
+            await engine.dispose()
+
+    event = asyncio.run(check_audit_event())
+    assert event is not None
+    assert event.entityType == "ado"
+    assert event.metadata_ == {"status_code": 429, "wait_seconds": 1.5, "retry_count": 1}
+
+    asyncio.run(_cleanup(ids))
 
     asyncio.run(_cleanup(ids))

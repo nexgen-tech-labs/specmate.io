@@ -26,7 +26,7 @@ from app.models import (
     TraceLink,
     Workspace,
 )
-from app.services.audit import record_audit_event
+from app.services.audit import make_rate_limit_recorder, record_audit_event
 from app.services.connectors.ado_auth import AdoConnection, check_connection_health, get_ado_connection
 from app.services.connectors.ado_publish import (
     AdoPublishOutcome,
@@ -44,6 +44,7 @@ from app.services.connectors.types import ConnectorError, ConnectorTransport
 from app.services.connectors.update_detection import ExistingPublication, find_existing_publication
 
 router = APIRouter()
+
 
 _DEFAULT_TYPE_SUGGESTIONS: dict[str, list[str]] = {
     "EPIC": ["Epic"],
@@ -358,7 +359,14 @@ async def publish_to_ado(
         existing = update_targets.get(candidate.item_id)
         if existing is not None:
             numeric_id = int(existing.external_key.removeprefix("AB#"))
-            outcome = await gateway.update(connection, numeric_id, candidate, field_defaults)
+            outcome = await gateway.update(
+                connection,
+                numeric_id,
+                candidate,
+                field_defaults,
+                transport=gateway.transport,
+                on_rate_limited=make_rate_limit_recorder(session, workspace.id, "ado"),
+            )
         else:
             outcome = await gateway.create(
                 connection,
@@ -369,6 +377,8 @@ async def publish_to_ado(
                 area_path,
                 iteration_path,
                 field_defaults,
+                transport=gateway.transport,
+                on_rate_limited=make_rate_limit_recorder(session, workspace.id, "ado"),
             )
 
         flags = dict(item.flags or {})

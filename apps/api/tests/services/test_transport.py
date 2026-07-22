@@ -195,10 +195,10 @@ async def test_direct_cloud_transport_calls_on_rate_limited_once_per_retry(
         httpx, "AsyncClient", partial(httpx.AsyncClient, transport=mock_transport)
     )
 
-    incidents: list[tuple[int, float]] = []
+    incidents: list[tuple[int, float, int]] = []
 
-    async def on_rate_limited(status_code: int, wait_seconds: float) -> None:
-        incidents.append((status_code, wait_seconds))
+    async def on_rate_limited(status_code: int, wait_seconds: float, attempt: int) -> None:
+        incidents.append((status_code, wait_seconds, attempt))
 
     transport = DirectCloudTransport()
     response = await transport.request(
@@ -210,7 +210,8 @@ async def test_direct_cloud_transport_calls_on_rate_limited_once_per_retry(
 
     assert response.status_code == 200
     assert len(incidents) == 2
-    assert all(status == 429 for status, _wait in incidents)
+    assert all(status == 429 for status, _wait, _attempt in incidents)
+    assert [attempt for _status, _wait, attempt in incidents] == [1, 2]
 
 
 async def test_direct_cloud_transport_falls_back_to_computed_backoff_on_http_date_retry_after(

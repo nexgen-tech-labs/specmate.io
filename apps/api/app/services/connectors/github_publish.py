@@ -4,6 +4,7 @@ task-list hierarchy, retry/backoff, and per-item results."""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import httpx
@@ -179,6 +180,7 @@ async def create_issue(
     labels: list[str],
     milestone: int | None,
     transport: ConnectorTransport = _default_transport,
+    on_rate_limited: Callable[[int, float, int], Awaitable[None]] | None = None,
 ) -> GitHubPublishOutcome:
     """Creates one issue; retry/backoff on rate-limiting (429/5xx, or a
     header-confirmed 403 secondary-rate-limit) is handled by the transport
@@ -199,6 +201,7 @@ async def create_issue(
             headers=connection.headers(),
             json=payload,
             timeout=30,
+            on_rate_limited=on_rate_limited,
         )
     except httpx.HTTPError as exc:
         return GitHubPublishOutcome(
@@ -270,6 +273,7 @@ async def update_issue(
     issue_number: int,
     candidate: GitHubPublishCandidate,
     transport: ConnectorTransport = _default_transport,
+    on_rate_limited: Callable[[int, float, int], Awaitable[None]] | None = None,
 ) -> GitHubPublishOutcome:
     """Updates title/body on an already-published issue (Issue 9.4) — labels and
     milestone are set once at creation and not touched by a source-content update.
@@ -286,6 +290,7 @@ async def update_issue(
             headers=connection.headers(),
             json={"title": candidate.content.title, "body": candidate.content.body_markdown},
             timeout=30,
+            on_rate_limited=on_rate_limited,
         )
     except httpx.HTTPError as exc:
         return GitHubPublishOutcome(

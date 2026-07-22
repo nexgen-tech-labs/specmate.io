@@ -4,6 +4,7 @@ hierarchy-aware ordering, retry/backoff, and per-item results."""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 import httpx
@@ -188,6 +189,7 @@ async def create_issue(
     parent_key: str | None,
     field_defaults: dict[str, object],
     transport: ConnectorTransport = _default_transport,
+    on_rate_limited: Callable[[int, float, int], Awaitable[None]] | None = None,
 ) -> PublishOutcome:
     """Creates one issue with 429/5xx retry + backoff (Issue 5.7). 4xx validation
     errors are permanent and surfaced with Jira's own messages."""
@@ -216,6 +218,7 @@ async def create_issue(
             auth=connection.auth(),
             json={"fields": payload.fields},
             timeout=30,
+            on_rate_limited=on_rate_limited,
         )
     except httpx.HTTPError as exc:
         return PublishOutcome(
@@ -259,6 +262,7 @@ async def update_issue(
     candidate: PublishCandidate,
     field_defaults: dict[str, object],
     transport: ConnectorTransport = _default_transport,
+    on_rate_limited: Callable[[int, float, int], Awaitable[None]] | None = None,
 ) -> PublishOutcome:
     """Updates summary/description/field-defaults on an already-published issue
     (Issue 9.4) — never touches project/issuetype/parent, set once at creation."""
@@ -280,6 +284,7 @@ async def update_issue(
             auth=connection.auth(),
             json={"fields": fields},
             timeout=30,
+            on_rate_limited=on_rate_limited,
         )
     except httpx.HTTPError as exc:
         return PublishOutcome(

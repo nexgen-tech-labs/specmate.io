@@ -110,7 +110,7 @@ class DirectCloudTransport:
         json: object | None = None,
         params: dict[str, str | int] | None = None,
         timeout: float = 30,
-        on_rate_limited: Callable[[int, float], Awaitable[None]] | None = None,
+        on_rate_limited: Callable[[int, float, int], Awaitable[None]] | None = None,
     ) -> httpx.Response:
         policy = _POLICIES[target]
         response: httpx.Response | None = None
@@ -140,7 +140,7 @@ class DirectCloudTransport:
             retry_after = response.headers.get("Retry-After")
             delay = _parse_retry_after_seconds(retry_after, policy.backoff_base_s * attempt)
             if on_rate_limited is not None:
-                await on_rate_limited(response.status_code, delay)
+                await on_rate_limited(response.status_code, delay, attempt)
             await asyncio.sleep(delay)
 
         assert response is not None  # loop always runs >=1 time (max_attempts >= 1)
@@ -170,7 +170,7 @@ class AgentRelayTransport:
         json: object | None = None,
         params: dict[str, str | int] | None = None,
         timeout: float = 30,
-        on_rate_limited: Callable[[int, float], Awaitable[None]] | None = None,
+        on_rate_limited: Callable[[int, float, int], Awaitable[None]] | None = None,
     ) -> httpx.Response:
         raise NotImplementedError(
             "AgentRelayTransport is a stub (Issue 11.1) — on-prem agent relay isn't "

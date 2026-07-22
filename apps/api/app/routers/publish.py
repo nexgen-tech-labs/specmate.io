@@ -26,7 +26,7 @@ from app.models import (
     TraceLink,
     Workspace,
 )
-from app.services.audit import record_audit_event
+from app.services.audit import make_rate_limit_recorder, record_audit_event
 from app.services.connectors.jira_auth import (
     JiraConnection,
     check_connection_health,
@@ -47,6 +47,7 @@ from app.services.connectors.types import ConnectorError, ConnectorTransport
 from app.services.connectors.update_detection import ExistingPublication, find_existing_publication
 
 router = APIRouter()
+
 
 # Default SpecMate -> Jira issue type suggestions, intersected with what discovery
 # actually finds in the project (Issue 5.3's sensible default mapping).
@@ -375,6 +376,8 @@ async def publish_to_jira(
                 existing.external_key,
                 candidate,
                 field_defaults,
+                transport=gateway.transport,
+                on_rate_limited=make_rate_limit_recorder(session, workspace.id, "jira"),
             )
         else:
             outcome = await gateway.create(
@@ -384,6 +387,8 @@ async def publish_to_jira(
                 candidate,
                 parent_key,
                 field_defaults,
+                transport=gateway.transport,
+                on_rate_limited=make_rate_limit_recorder(session, workspace.id, "jira"),
             )
 
         flags = dict(item.flags or {})

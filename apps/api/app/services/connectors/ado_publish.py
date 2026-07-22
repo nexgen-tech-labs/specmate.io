@@ -5,6 +5,7 @@ backoff, and per-item results. Mirrors jira_publish.py's shape."""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import httpx
@@ -224,6 +225,7 @@ async def create_work_item(
     iteration_path: str | None,
     field_defaults: dict[str, object],
     transport: ConnectorTransport = _default_transport,
+    on_rate_limited: Callable[[int, float, int], Awaitable[None]] | None = None,
 ) -> AdoPublishOutcome:
     """Creates one work item; retry/backoff on 429/5xx is handled by the
     transport (Issue 12.2)."""
@@ -239,6 +241,7 @@ async def create_work_item(
             json=patch,
             headers={"Content-Type": "application/json-patch+json"},
             timeout=30,
+            on_rate_limited=on_rate_limited,
         )
     except httpx.HTTPError as exc:
         return AdoPublishOutcome(
@@ -281,6 +284,7 @@ async def update_work_item(
     candidate: AdoPublishCandidate,
     field_defaults: dict[str, object],
     transport: ConnectorTransport = _default_transport,
+    on_rate_limited: Callable[[int, float, int], Awaitable[None]] | None = None,
 ) -> AdoPublishOutcome:
     """Updates title/description/field-defaults on an already-published work item
     (Issue 9.4) — never touches area/iteration/parent relations, which are set once
@@ -306,6 +310,7 @@ async def update_work_item(
             json=ops,
             headers={"Content-Type": "application/json-patch+json"},
             timeout=30,
+            on_rate_limited=on_rate_limited,
         )
     except httpx.HTTPError as exc:
         return AdoPublishOutcome(

@@ -4,6 +4,7 @@ dependency override (mirrors test_publish.py/test_publish_ado.py)."""
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import DraftItem, Project, PublishedItem, PublishMapping, TraceLink, Workspace
+from app.models import AuditEvent, DraftItem, Project, PublishedItem, PublishMapping, TraceLink, Workspace
 from app.routers.publish_github import GitHubPublishGateway, get_github_gateway
 from app.services.connectors.github_auth import TokenConnection
 from app.services.connectors.github_publish import GitHubPublishCandidate, GitHubPublishOutcome
@@ -49,6 +50,7 @@ class _FakeGitHub:
             candidate: GitHubPublishCandidate,
             labels: list[str],
             _milestone: int | None,
+            **_kwargs: object,
         ) -> GitHubPublishOutcome:
             if self.fail_first and not self._failed_once:
                 self._failed_once = True
@@ -66,6 +68,7 @@ class _FakeGitHub:
             _repo: str,
             issue_number: int,
             candidate: GitHubPublishCandidate,
+            **_kwargs: object,
         ) -> GitHubPublishOutcome:
             self.updated.append({"number": issue_number, "title": candidate.content.title})
             return GitHubPublishOutcome(
@@ -406,5 +409,74 @@ def test_publishing_a_targeted_regen_revision_updates_not_duplicates() -> None:
             await engine.dispose()
 
     assert asyncio.run(check_single_published_row()) == 1
+
+
+def test_rate_limit_incident_during_publish_records_audit_event() -> None:
+    """Issue #89 (Task 5): create() invoking its on_rate_limited callback (as the
+    transport does on each retry-triggering 429/5xx) results in a connector.rate_
+    limited AuditEvent for the workspace, even though the publish itself succeeds."""
+    ids = asyncio.run(_fixture())
+    fake = _FakeGitHub()
+    gateway = fake.gateway()
+
+    async def rate_limited_create(
+        _conn: object,
+        _repo: str,
+        candidate: GitHubPublishCandidate,
+        labels: list[str],
+        _milestone: int | None,
+        **kwargs: object,
+    ) -> GitHubPublishOutcome:
+        on_rate_limited = kwargs.get("on_rate_limited")
+        assert callable(on_rate_limited)
+        callback: Callable[[int, float, int], Awaitable[None]] = on_rate_limited
+        await callback(429, 1.5, 1)
+        fake.counter += 1
+        number = 100 + fake.counter
+        fake.created.append({"number": number, "title": candidate.content.title, "labels": labels})
+        return GitHubPublishOutcome(
+            item_id=candidate.item_id, ok=True, key=f"#{number}", number=number,
+            url=f"https://github.com/acme/payments/issues/{number}",
+        )
+
+    gateway.create = rate_limited_create
+
+    app.dependency_overrides[get_github_gateway] = lambda: gateway
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        response = client.post(
+            f"/projects/{ids['project_id']}/publish/github", json={"item_ids": [ids["epic_id"]]}
+        )
+    finally:
+        app.dependency_overrides.pop(get_github_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["succeeded"] == 1 and body["failed"] == 0
+
+    async def check_audit_event() -> AuditEvent | None:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                return (
+                    await session.execute(
+                        select(AuditEvent).where(
+                            AuditEvent.workspaceId == ids["workspace_id"],
+                            AuditEvent.action == "connector.rate_limited",
+                        )
+                    )
+                ).scalar_one_or_none()
+        finally:
+            await engine.dispose()
+
+    event = asyncio.run(check_audit_event())
+    assert event is not None
+    assert event.entityType == "github"
+    assert event.metadata_ == {"status_code": 429, "wait_seconds": 1.5, "retry_count": 1}
+
+    asyncio.run(_cleanup(ids))
 
     asyncio.run(_cleanup(ids))
