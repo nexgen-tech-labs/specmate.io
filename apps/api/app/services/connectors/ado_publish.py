@@ -5,7 +5,6 @@ backoff, and per-item results. Mirrors jira_publish.py's shape."""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 
 import httpx
@@ -16,8 +15,6 @@ from app.services.connectors.transport import DirectCloudTransport
 from app.services.connectors.types import ConnectorError, ConnectorTransport
 from app.models import DraftItem
 
-_MAX_ATTEMPTS = 4
-_BACKOFF_BASE_S = 1.5
 # ADO's native parent-child relation type (not a generic "related" link — Issue 6.6 AC).
 _PARENT_RELATION = "System.LinkTypes.Hierarchy-Reverse"
 
@@ -34,6 +31,7 @@ async def discover_projects(
         response = await transport.request(
             "GET",
             f"{connection.org_url()}/_apis/projects",
+            target="ado",
             auth=connection.auth(),
             params={"api-version": connection.api_version()},
             timeout=30,
@@ -57,6 +55,7 @@ async def discover_project_meta(
         types_response = await transport.request(
             "GET",
             f"{base}/workitemtypes",
+            target="ado",
             auth=connection.auth(),
             params={"api-version": connection.api_version()},
             timeout=30,
@@ -76,6 +75,7 @@ async def discover_project_meta(
         areas_response = await transport.request(
             "GET",
             f"{base}/classificationnodes/areas",
+            target="ado",
             auth=connection.auth(),
             params={"api-version": connection.api_version(), "$depth": 2},
             timeout=30,
@@ -83,6 +83,7 @@ async def discover_project_meta(
         iterations_response = await transport.request(
             "GET",
             f"{base}/classificationnodes/iterations",
+            target="ado",
             auth=connection.auth(),
             params={"api-version": connection.api_version(), "$depth": 2},
             timeout=30,
@@ -224,58 +225,53 @@ async def create_work_item(
     field_defaults: dict[str, object],
     transport: ConnectorTransport = _default_transport,
 ) -> AdoPublishOutcome:
-    """Creates one work item with 429/5xx retry + backoff (Issue 6.7)."""
+    """Creates one work item; retry/backoff on 429/5xx is handled by the
+    transport (Issue 12.2)."""
     patch = _json_patch(candidate.content, area_path, iteration_path, field_defaults, parent_url)
 
-    last_error = "unknown"
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            response = await transport.request(
-                "POST",
-                f"{connection.org_url()}/{project_name}/_apis/wit/workitems/${work_item_type}",
-                auth=connection.auth(),
-                params={"api-version": connection.api_version()},
-                json=patch,
-                headers={"Content-Type": "application/json-patch+json"},
-                timeout=30,
-            )
-        except httpx.HTTPError as exc:
-            last_error = f"network error: {exc}"
-            await asyncio.sleep(_BACKOFF_BASE_S * attempt)
-            continue
-
-        if response.status_code in (200, 201):
-            body = response.json()
-            work_item_id = body["id"]
-            return AdoPublishOutcome(
-                item_id=candidate.item_id,
-                ok=True,
-                key=f"AB#{work_item_id}",
-                url=f"{connection.org_url()}/_workitems/edit/{work_item_id}",
-                attempts=attempt,
-            )
-        if response.status_code == 429 or response.status_code >= 500:
-            retry_after = response.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else _BACKOFF_BASE_S * attempt
-            last_error = f"HTTP {response.status_code} (transient)"
-            await asyncio.sleep(delay)
-            continue
-        try:
-            detail = response.json()
-        except ValueError:
-            detail = response.text[:300]
+    try:
+        response = await transport.request(
+            "POST",
+            f"{connection.org_url()}/{project_name}/_apis/wit/workitems/${work_item_type}",
+            target="ado",
+            auth=connection.auth(),
+            params={"api-version": connection.api_version()},
+            json=patch,
+            headers={"Content-Type": "application/json-patch+json"},
+            timeout=30,
+        )
+    except httpx.HTTPError as exc:
         return AdoPublishOutcome(
             item_id=candidate.item_id,
             ok=False,
-            error=f"ADO rejected the work item ({response.status_code}): {detail}",
-            attempts=attempt,
+            error=f"network error: {exc}",
         )
 
+    if response.status_code in (200, 201):
+        body = response.json()
+        work_item_id = body["id"]
+        return AdoPublishOutcome(
+            item_id=candidate.item_id,
+            ok=True,
+            key=f"AB#{work_item_id}",
+            url=f"{connection.org_url()}/_workitems/edit/{work_item_id}",
+        )
+    if response.status_code == 429 or response.status_code >= 500:
+        # Transport already retried per ADO_POLICY and gave up -- this is the
+        # final failed response, not a first attempt.
+        return AdoPublishOutcome(
+            item_id=candidate.item_id,
+            ok=False,
+            error=f"Gave up after retries — last error: HTTP {response.status_code} (transient)",
+        )
+    try:
+        detail = response.json()
+    except ValueError:
+        detail = response.text[:300]
     return AdoPublishOutcome(
         item_id=candidate.item_id,
         ok=False,
-        error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
-        attempts=_MAX_ATTEMPTS,
+        error=f"ADO rejected the work item ({response.status_code}): {detail}",
     )
 
 
@@ -300,53 +296,47 @@ async def update_work_item(
     for field_id, value in field_defaults.items():
         ops.append({"op": "replace", "path": f"/fields/{field_id}", "value": value})
 
-    last_error = "unknown"
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            response = await transport.request(
-                "PATCH",
-                f"{connection.org_url()}/_apis/wit/workitems/{work_item_id}",
-                auth=connection.auth(),
-                params={"api-version": connection.api_version()},
-                json=ops,
-                headers={"Content-Type": "application/json-patch+json"},
-                timeout=30,
-            )
-        except httpx.HTTPError as exc:
-            last_error = f"network error: {exc}"
-            await asyncio.sleep(_BACKOFF_BASE_S * attempt)
-            continue
-
-        if response.status_code in (200, 201):
-            return AdoPublishOutcome(
-                item_id=candidate.item_id,
-                ok=True,
-                key=f"AB#{work_item_id}",
-                url=f"{connection.org_url()}/_workitems/edit/{work_item_id}",
-                attempts=attempt,
-            )
-        if response.status_code == 429 or response.status_code >= 500:
-            retry_after = response.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else _BACKOFF_BASE_S * attempt
-            last_error = f"HTTP {response.status_code} (transient)"
-            await asyncio.sleep(delay)
-            continue
-        try:
-            detail = response.json()
-        except ValueError:
-            detail = response.text[:300]
+    try:
+        response = await transport.request(
+            "PATCH",
+            f"{connection.org_url()}/_apis/wit/workitems/{work_item_id}",
+            target="ado",
+            auth=connection.auth(),
+            params={"api-version": connection.api_version()},
+            json=ops,
+            headers={"Content-Type": "application/json-patch+json"},
+            timeout=30,
+        )
+    except httpx.HTTPError as exc:
         return AdoPublishOutcome(
             item_id=candidate.item_id,
             ok=False,
-            error=f"ADO rejected the work item update ({response.status_code}): {detail}",
-            attempts=attempt,
+            error=f"network error: {exc}",
         )
 
+    if response.status_code in (200, 201):
+        return AdoPublishOutcome(
+            item_id=candidate.item_id,
+            ok=True,
+            key=f"AB#{work_item_id}",
+            url=f"{connection.org_url()}/_workitems/edit/{work_item_id}",
+        )
+    if response.status_code == 429 or response.status_code >= 500:
+        # Transport already retried per ADO_POLICY and gave up -- this is the
+        # final failed response, not a first attempt.
+        return AdoPublishOutcome(
+            item_id=candidate.item_id,
+            ok=False,
+            error=f"Gave up after retries — last error: HTTP {response.status_code} (transient)",
+        )
+    try:
+        detail = response.json()
+    except ValueError:
+        detail = response.text[:300]
     return AdoPublishOutcome(
         item_id=candidate.item_id,
         ok=False,
-        error=f"Gave up after {_MAX_ATTEMPTS} attempts — last error: {last_error}",
-        attempts=_MAX_ATTEMPTS,
+        error=f"ADO rejected the work item update ({response.status_code}): {detail}",
     )
 
 
@@ -363,6 +353,7 @@ async def add_comment(
         response = await transport.request(
             "POST",
             f"{connection.org_url()}/{project_name}/_apis/wit/workItems/{work_item_id}/comments",
+            target="ado",
             auth=connection.auth(),
             params={"api-version": "7.1-preview.3"},
             json={"text": comment_text},
@@ -392,6 +383,7 @@ async def fetch_work_item(
         response = await transport.request(
             "GET",
             f"{connection.org_url()}/_apis/wit/workitems/{work_item_id}",
+            target="ado",
             auth=connection.auth(),
             params={"api-version": connection.api_version()},
             timeout=30,
