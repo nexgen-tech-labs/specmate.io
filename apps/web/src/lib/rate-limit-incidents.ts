@@ -45,29 +45,27 @@ export async function getRecentRateLimitIncidents(limit = 200): Promise<RateLimi
 }
 
 export async function getRateLimitSummary(): Promise<RateLimitSummaryRow[]> {
-  const events = await prisma.auditEvent.findMany({
+  const grouped = await prisma.auditEvent.groupBy({
+    by: ['entityType', 'workspaceId'],
     where: { action: RATE_LIMIT_ACTION },
-    orderBy: { createdAt: 'desc' },
-    include: { workspace: { select: { name: true } } },
+    _count: { _all: true },
+    _max: { createdAt: true },
   });
 
-  const grouped = new Map<string, RateLimitSummaryRow>();
-  for (const e of events) {
-    const key = `${e.entityType}::${e.workspaceId}`;
-    const existing = grouped.get(key);
-    if (existing) {
-      existing.incidentCount += 1;
-      if (e.createdAt > existing.mostRecentAt) existing.mostRecentAt = e.createdAt;
-    } else {
-      grouped.set(key, {
-        tool: e.entityType,
-        workspaceId: e.workspaceId,
-        workspaceName: e.workspace.name,
-        incidentCount: 1,
-        mostRecentAt: e.createdAt,
-      });
-    }
-  }
+  const workspaceIds = [...new Set(grouped.map((g) => g.workspaceId))];
+  const workspaces = await prisma.workspace.findMany({
+    where: { id: { in: workspaceIds } },
+    select: { id: true, name: true },
+  });
+  const nameById = new Map(workspaces.map((w) => [w.id, w.name]));
 
-  return Array.from(grouped.values()).sort((a, b) => b.incidentCount - a.incidentCount);
+  return grouped
+    .map((g) => ({
+      tool: g.entityType,
+      workspaceId: g.workspaceId,
+      workspaceName: nameById.get(g.workspaceId) ?? g.workspaceId,
+      incidentCount: g._count._all,
+      mostRecentAt: g._max.createdAt ?? new Date(0),
+    }))
+    .sort((a, b) => b.incidentCount - a.incidentCount);
 }
