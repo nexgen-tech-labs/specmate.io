@@ -21,13 +21,19 @@ requests rather than blocking them until the whole burst drains.
 Implementation note: this does NOT use asyncio.Semaphore. A bare semaphore
 only tells you "a slot is free," not "whose turn is it" — pairing it with a
 round-robin queue means every acquire/release has to coordinate two separate
-primitives, and the very first wave of callers (before anyone has released
-anything) never has a "release" event to trigger dispatch, which is a classic
-way to deadlock a queue+semaphore combo. Instead, `_slots_available` is
-tracked directly as plain state protected by `_lock`, and `_dispatch()` — the
-single place that assigns free slots to queued callers — is invoked both after
-enqueueing (so waves of callers self-dispatch immediately) and after release
-(so callers waiting behind a freed slot get woken).
+primitives, which gets error-prone once you need an accurate queue-depth
+count. The original sketch tried exactly that (semaphore + separate
+event-queue) and its `queue_depth_at_submit` only counted items sitting in
+the per-workspace deques, not callers that already held a semaphore slot —
+so a waiter enqueued while the sole slot was in use could observe
+`queue_depth_at_submit == 0` when it should have been >= 1, which is
+reported to end users and must be accurate. Instead, `_slots_available` is
+tracked directly as plain state protected by `_lock`, so slot occupancy and
+queue contents are always visible in one place when computing depth.
+`_dispatch()` — the single place that assigns free slots to queued callers —
+is invoked both after enqueueing (so waves of callers self-dispatch
+immediately) and after release (so callers waiting behind a freed slot get
+woken).
 """
 
 from __future__ import annotations
