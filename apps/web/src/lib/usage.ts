@@ -33,6 +33,9 @@ function currentPeriodBoundsUtc(now = new Date()): { start: Date; end: Date } {
 }
 
 export async function getWorkspaceUsageSummary(workspaceId: string): Promise<UsageSummary> {
+  // Callers must have already verified workspace access (e.g. via requireWorkspaceRole)
+  // before calling this — a nonexistent workspaceId here indicates a caller bug, not a
+  // normal 404 case.
   const workspace = await prisma.workspace.findUniqueOrThrow({
     where: { id: workspaceId },
     select: { pricingTier: true },
