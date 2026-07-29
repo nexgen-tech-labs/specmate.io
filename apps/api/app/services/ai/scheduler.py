@@ -115,14 +115,37 @@ class AIScheduler:
 
             queue_depth_at_submit = 0 if waiter.event.is_set() else requests_ahead
 
-        await waiter.event.wait()
-        queue_wait_seconds = time.monotonic() - start
+        got_slot = False
         try:
+            try:
+                await waiter.event.wait()
+                got_slot = True
+            except asyncio.CancelledError:
+                # Cancelled while still waiting for a turn (e.g. caller-side
+                # timeout). If dispatch hasn't reached us yet, drop our
+                # waiter from the queue so it doesn't linger forever and
+                # skew queue-depth accounting for everyone behind it. If
+                # dispatch *did* reach us concurrently with the cancellation,
+                # we now hold a slot we'll never use -- give it back.
+                async with self._lock:
+                    if waiter.event.is_set():
+                        self._slots_available += 1
+                        self._dispatch_locked()
+                    else:
+                        pending = self._queues.get(workspace_id)
+                        if pending is not None and waiter in pending:
+                            pending.remove(waiter)
+                            if not pending:
+                                del self._queues[workspace_id]
+                raise
+
+            queue_wait_seconds = time.monotonic() - start
             yield Ticket(
                 queue_wait_seconds=queue_wait_seconds,
                 queue_depth_at_submit=queue_depth_at_submit,
             )
         finally:
-            async with self._lock:
-                self._slots_available += 1
-                self._dispatch_locked()
+            if got_slot:
+                async with self._lock:
+                    self._slots_available += 1
+                    self._dispatch_locked()
