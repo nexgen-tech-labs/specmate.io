@@ -25,7 +25,7 @@ from app.models import (
     TraceLink,
 )
 from app.services.audit import record_audit_event
-from app.services.ai.adapter import AIAdapter, GenerationRequest, Message
+from app.services.ai.adapter import AIAdapter, AIGenerationError, GenerationRequest, Message
 from app.services.ai.claude_adapter import ClaudeAdapter
 from app.services.ai.logging_adapter import LoggingAdapter
 from app.services.ai.prompts.generation_v1 import GENERATION_PROMPT_VERSION, REGENERATE_V1
@@ -42,6 +42,8 @@ from app.services.generation.targeted import (
 router = APIRouter()
 
 _ai_scheduler = AIScheduler(max_concurrent=settings.max_concurrent_ai_calls)
+
+AI_UNAVAILABLE_DETAIL = "AI generation is temporarily unavailable. Please try again in a few moments."
 
 
 def get_generation_adapter(
@@ -87,6 +89,8 @@ async def generate(
         )
     except GenerationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AIGenerationError as exc:
+        raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
 
     after = (
         await session.execute(
@@ -138,17 +142,20 @@ async def regenerate_item(
         f"Source fragments:\n{source_context or '(none recorded)'}\n\n"
         f"Reviewer's additional context:\n{body.context}"
     )
-    result = await adapter.generate(
-        GenerationRequest(
-            task="structuring",
-            system=REGENERATE_V1,
-            messages=[Message(role="user", content=user)],
-            schema_=REGENERATE_SCHEMA,
-            workspace_id=body.workspace_id,
-            project_id=item.projectId,
-            prompt_version=GENERATION_PROMPT_VERSION,
+    try:
+        result = await adapter.generate(
+            GenerationRequest(
+                task="structuring",
+                system=REGENERATE_V1,
+                messages=[Message(role="user", content=user)],
+                schema_=REGENERATE_SCHEMA,
+                workspace_id=body.workspace_id,
+                project_id=item.projectId,
+                prompt_version=GENERATION_PROMPT_VERSION,
+            )
         )
-    )
+    except AIGenerationError as exc:
+        raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
 
     now = _now()
     new_item = DraftItem(
@@ -235,6 +242,8 @@ async def targeted_regenerate(
         )
     except TargetedRegenerationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AIGenerationError as exc:
+        raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
 
     return TargetedRegenerateResponse(
         revised_item_ids=result.revised_item_ids,

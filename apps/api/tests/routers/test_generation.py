@@ -25,8 +25,8 @@ from app.models import (
     TraceLink,
     Workspace,
 )
-from app.routers.generation import get_generation_adapter
-from app.services.ai.adapter import GenerationRequest, GenerationResult, UsageInfo
+from app.routers.generation import AI_UNAVAILABLE_DETAIL, get_generation_adapter
+from app.services.ai.adapter import AIGenerationError, GenerationRequest, GenerationResult, UsageInfo
 from tests.audit_cleanup import purge_audit_events
 
 
@@ -141,6 +141,16 @@ class FakeAdapter:
             model="fake-model",
             prompt_version="generation_v1",
         )
+
+
+class FailingAdapter:
+    """Raises AIGenerationError with a distinctive, secret-looking payload — used to
+    prove the router never leaks raw provider exception text into the response."""
+
+    SECRET = "rate_limit_exceeded: sk-ant-api03-SECRET-LOOKING-TOKEN retry after 30s"
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        raise AIGenerationError(self.SECRET)
 
 
 async def _create_fixture() -> dict[str, object]:
@@ -470,3 +480,55 @@ def test_generate_with_no_fragments_returns_422() -> None:
             await engine.dispose()
 
     asyncio.run(cleanup())
+
+
+def test_generate_returns_503_when_ai_generation_fails() -> None:
+    ids = asyncio.run(_create_fixture())
+    project_id = str(ids["project_id"])
+
+    app.dependency_overrides[get_generation_adapter] = lambda: FailingAdapter()
+    client = TestClient(app)
+    try:
+        response = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        app.dependency_overrides.pop(get_generation_adapter, None)
+        _dispose_app_engine()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
+    assert "SECRET-LOOKING-TOKEN" not in response.text
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_regenerate_item_returns_503_when_ai_generation_fails() -> None:
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        client.post(f"/projects/{project_id}/generate", json={})
+        _dispose_app_engine()
+
+        items = asyncio.run(_fetch_items(project_id))
+        erp_story = next(i for i in items if "ERP" in i.title)
+    finally:
+        _clear_override()
+
+    app.dependency_overrides[get_generation_adapter] = lambda: FailingAdapter()
+    client = TestClient(app)
+    try:
+        response = client.post(
+            f"/draft-items/{erp_story.id}/regenerate",
+            json={"context": "The export targets ERP v3 via REST.", "workspace_id": str(ids["workspace_id"])},
+        )
+    finally:
+        app.dependency_overrides.pop(get_generation_adapter, None)
+        _dispose_app_engine()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
+    assert "SECRET-LOOKING-TOKEN" not in response.text
+
+    asyncio.run(_cleanup(ids))

@@ -17,8 +17,8 @@ from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
 from app.models import DraftItem, Project, RawRequirement, Source, SourceDiff, TraceLink, Workspace
-from app.routers.generation import get_generation_adapter
-from app.services.ai.adapter import GenerationRequest, GenerationResult, UsageInfo
+from app.routers.generation import AI_UNAVAILABLE_DETAIL, get_generation_adapter
+from app.services.ai.adapter import AIGenerationError, GenerationRequest, GenerationResult, UsageInfo
 from tests.audit_cleanup import purge_audit_events
 
 
@@ -61,6 +61,16 @@ class FakeAdapter:
             model="fake-model",
             prompt_version="generation_v1",
         )
+
+
+class FailingAdapter:
+    """Raises AIGenerationError with a distinctive, secret-looking payload — used to
+    prove the router never leaks raw provider exception text into the response."""
+
+    SECRET = "rate_limit_exceeded: sk-ant-api03-SECRET-LOOKING-TOKEN retry after 30s"
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        raise AIGenerationError(self.SECRET)
 
 
 async def _build_fixture() -> dict[str, object]:
@@ -360,3 +370,24 @@ def test_targeted_regeneration_returns_422_without_a_diff() -> None:
             await engine.dispose()
 
     asyncio.run(cleanup())
+
+
+def test_targeted_regenerate_returns_503_when_ai_generation_fails() -> None:
+    ids = asyncio.run(_build_fixture())
+
+    app.dependency_overrides[get_generation_adapter] = lambda: FailingAdapter()
+    client = TestClient(app)
+    try:
+        response = client.post(
+            f"/sources/{ids['v2_source_id']}/targeted-regenerate",
+            json={"workspace_id": str(ids["workspace_id"])},
+        )
+    finally:
+        app.dependency_overrides.pop(get_generation_adapter, None)
+        _dispose_app_engine()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
+    assert "SECRET-LOOKING-TOKEN" not in response.text
+
+    asyncio.run(_cleanup(ids))
