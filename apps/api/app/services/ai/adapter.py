@@ -50,6 +50,8 @@ class GenerationResult:
     latency_ms: int
     model: str
     prompt_version: str | None
+    queue_wait_seconds: float = 0.0
+    queue_depth_at_submit: int = 0
 
 
 class AIGenerationError(Exception):
