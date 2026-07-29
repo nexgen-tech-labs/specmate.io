@@ -1,25 +1,23 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import type { UsageSummary } from '@/lib/usage';
 
 const ACTIVE_STATUSES = new Set(['TRIALING', 'ACTIVE']);
 
-interface UsageSummary {
-  publishedItemCount: number;
-  includedItems: number | null;
-  remaining: number | null;
-  overageCount: number;
-  percentUsed: number | null;
-}
+type UsageDisplayFields = Pick<
+  UsageSummary,
+  'publishedItemCount' | 'includedItems' | 'remaining' | 'overageCount' | 'percentUsed'
+>;
 
 function UsageSection({ workspaceId }: { workspaceId: string }) {
-  const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [usage, setUsage] = useState<UsageDisplayFields | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     void fetch(`/api/workspaces/${workspaceId}/usage`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: UsageSummary | null) => {
+      .then((data: UsageDisplayFields | null) => {
         if (!cancelled) setUsage(data);
       })
       .catch(() => {
