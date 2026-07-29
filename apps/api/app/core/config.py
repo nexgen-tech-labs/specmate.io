@@ -6,6 +6,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5434/specmate"
     anthropic_api_key: str = ""
+    max_concurrent_ai_calls: int = 4
     environment: str = "local"
     azure_storage_connection_string: str = ""
     azure_storage_container: str = "sources"

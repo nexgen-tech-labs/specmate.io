@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import get_db_session
 from app.models import (
     AuditActorType,
@@ -28,6 +29,8 @@ from app.services.ai.adapter import AIAdapter, GenerationRequest, Message
 from app.services.ai.claude_adapter import ClaudeAdapter
 from app.services.ai.logging_adapter import LoggingAdapter
 from app.services.ai.prompts.generation_v1 import GENERATION_PROMPT_VERSION, REGENERATE_V1
+from app.services.ai.scheduler import AIScheduler
+from app.services.ai.scheduling_adapter import SchedulingAdapter
 from app.services.generation.pipeline import GenerationError, run_generation
 from app.services.generation.schemas import REGENERATE_SCHEMA
 from app.services.generation.targeted import (
@@ -38,12 +41,14 @@ from app.services.generation.targeted import (
 
 router = APIRouter()
 
+_ai_scheduler = AIScheduler(max_concurrent=settings.max_concurrent_ai_calls)
+
 
 def get_generation_adapter(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> AIAdapter:
     """FastAPI dependency — overridden in tests to inject a fake adapter."""
-    return LoggingAdapter(ClaudeAdapter(), session)
+    return SchedulingAdapter(LoggingAdapter(ClaudeAdapter(), session), _ai_scheduler)
 
 
 def _now() -> datetime:
