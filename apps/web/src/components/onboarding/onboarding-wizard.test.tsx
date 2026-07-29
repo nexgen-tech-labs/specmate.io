@@ -120,6 +120,41 @@ describe('OnboardingWizard', () => {
     expect(screen.queryByText(/items drafted/i)).toBeNull();
   });
 
+  it('shows the AI-capacity error message (not a generic failure) when generation is rate-limited', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: async () => ({
+          detail: 'AI generation is temporarily unavailable. Please try again in a few moments.',
+        }),
+      }),
+    );
+
+    render(
+      <OnboardingWizard
+        workspaceId="ws-1"
+        projectId="proj-1"
+        projectName="Payments Portal"
+        hasConnectedTool={false}
+        hasSource
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }));
+    fireEvent.click(screen.getByRole('button', { name: /generate items/i }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'AI generation is temporarily unavailable. Please try again in a few moments.',
+        ),
+      ).toBeDefined(),
+    );
+    expect(screen.queryByText(/items drafted/i)).toBeNull();
+    expect(screen.queryByText('Generation failed.')).toBeNull();
+  });
+
   describe('tour wiring (Bug 1: tour/wizard step state sync)', () => {
     it('calls onStepChange with the real starting step on mount, including when it is not "connect"', () => {
       const onStepChange = vi.fn();
