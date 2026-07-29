@@ -21,6 +21,9 @@ function UsageSection({ workspaceId }: { workspaceId: string }) {
       .then((res) => (res.ok ? res.json() : null))
       .then((data: UsageSummary | null) => {
         if (!cancelled) setUsage(data);
+      })
+      .catch(() => {
+        if (!cancelled) setUsage(null);
       });
     return () => {
       cancelled = true;
