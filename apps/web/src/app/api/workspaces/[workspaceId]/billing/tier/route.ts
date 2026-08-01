@@ -44,10 +44,22 @@ export async function POST(request: Request, { params }: Params) {
   // coherent Stripe-side action is canceling, not updating line items.
   if (workspace.stripeSubscriptionId && isStripeConfigured()) {
     const stripe = getStripeClient();
-    await stripe.subscriptions.update(workspace.stripeSubscriptionId, {
-      cancel_at: Math.floor(Date.now() / 1000),
-      proration_behavior: 'create_prorations',
-    });
+    try {
+      await stripe.subscriptions.update(workspace.stripeSubscriptionId, {
+        cancel_at: Math.floor(Date.now() / 1000),
+        proration_behavior: 'create_prorations',
+      });
+    } catch (err) {
+      console.error('Failed to cancel Stripe subscription for tier change', {
+        workspaceId,
+        stripeSubscriptionId: workspace.stripeSubscriptionId,
+        err,
+      });
+      return NextResponse.json(
+        { error: 'Could not cancel the existing subscription. The plan was not changed.' },
+        { status: 502 },
+      );
+    }
   }
 
   await prisma.workspace.update({

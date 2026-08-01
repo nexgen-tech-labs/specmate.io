@@ -139,6 +139,27 @@ describe('POST /api/workspaces/[workspaceId]/billing/tier', () => {
     }
   });
 
+  it('returns a clean 502 and does not change the tier when the Stripe cancellation call fails', async () => {
+    const workspace = await createWorkspace({
+      pricingTier: 'STARTER',
+      subscriptionStatus: 'ACTIVE',
+      stripeSubscriptionId: 'sub_active_456',
+    });
+    subscriptionsUpdate.mockRejectedValueOnce(new Error('Stripe is down'));
+
+    try {
+      const res = await POST(makeRequest({ tier: 'ENTERPRISE' }), {
+        params: Promise.resolve({ workspaceId: workspace.id }),
+      });
+      expect(res.status).toBe(502);
+
+      const unchanged = await prisma.workspace.findUniqueOrThrow({ where: { id: workspace.id } });
+      expect(unchanged.pricingTier).toBe('STARTER');
+    } finally {
+      await cleanupWorkspace(workspace.id);
+    }
+  });
+
   it('rejects an invalid tier value with 400', async () => {
     const workspace = await createWorkspace({ pricingTier: 'STARTER' });
 
