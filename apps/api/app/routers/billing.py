@@ -10,14 +10,21 @@ reporting only ever sends the delta.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
-from app.services.billing.metering import meter_all_workspaces_for_current_period
+from app.models import UsagePeriod, UsageReconciliationFlag
+from app.services.billing.metering import (
+    current_period_bounds,
+    meter_all_workspaces_for_current_period,
+)
+from app.services.billing.reconciliation import reconcile_workspace_usage
 from app.services.billing.stripe_reporting import BillingNotConfiguredError, report_usage_period
 
 router = APIRouter()
@@ -59,3 +66,85 @@ async def meter_usage(
     await session.commit()
 
     return MeterUsageResponse(results=results, stripe_reporting_skipped=stripe_reporting_skipped)
+
+
+class ReconciliationFlagResult(BaseModel):
+    workspace_id: str
+    usage_period_id: str
+    internal_count: int
+    stripe_count: int
+
+
+class ReconcileUsageResponse(BaseModel):
+    checked: int
+    flagged: list[ReconciliationFlagResult]
+    stripe_reconciliation_skipped: bool
+
+
+@router.post("/billing/reconcile-usage")
+async def reconcile_usage(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ReconcileUsageResponse:
+    """Manual-trigger reconciliation sweep (Issue 12.5): for every UsagePeriod row
+    in the current billing period, reads back Stripe's own recorded total and
+    diffs it against our reportedCount, flagging mismatches. Same
+    per-workspace-error-tolerance as /billing/meter-usage: a single workspace's
+    Stripe misconfiguration (e.g. STRIPE_USAGE_METER_ID unset, or a workspace
+    missing a stripeCustomerId that somehow still triggers a config error)
+    doesn't abort the whole sweep — it's skipped and surfaced via
+    stripe_reconciliation_skipped rather than 500ing the whole request."""
+    period_start, _ = current_period_bounds()
+    usage_periods = (
+        await session.execute(
+            select(UsagePeriod).where(UsagePeriod.periodStart == period_start)
+        )
+    ).scalars().all()
+
+    flagged: list[ReconciliationFlagResult] = []
+    stripe_reconciliation_skipped = False
+    for usage_period in usage_periods:
+        try:
+            flag = await reconcile_workspace_usage(session, usage_period)
+        except BillingNotConfiguredError:
+            stripe_reconciliation_skipped = True
+            continue
+        if flag is not None:
+            flagged.append(
+                ReconciliationFlagResult(
+                    workspace_id=flag.workspaceId,
+                    usage_period_id=flag.usagePeriodId,
+                    internal_count=flag.internalCount,
+                    stripe_count=flag.stripeCount,
+                )
+            )
+    await session.commit()
+    return ReconcileUsageResponse(
+        checked=len(usage_periods),
+        flagged=flagged,
+        stripe_reconciliation_skipped=stripe_reconciliation_skipped,
+    )
+
+
+class ResolveReconciliationBody(BaseModel):
+    resolved_by_user_id: str | None = None
+
+
+class ResolveReconciliationResponse(BaseModel):
+    ok: bool
+
+
+@router.post("/billing/reconciliation-flags/{flag_id}/resolve")
+async def resolve_reconciliation_flag(
+    flag_id: str,
+    body: ResolveReconciliationBody,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ResolveReconciliationResponse:
+    flag = await session.get(UsageReconciliationFlag, flag_id)
+    if flag is None:
+        raise HTTPException(status_code=404, detail="Reconciliation flag not found.")
+    if flag.resolvedAt is not None:
+        raise HTTPException(status_code=409, detail="Flag is already resolved.")
+    flag.resolvedAt = datetime.now(UTC).replace(tzinfo=None)
+    flag.resolvedByUserId = body.resolved_by_user_id
+    await session.commit()
+    return ResolveReconciliationResponse(ok=True)

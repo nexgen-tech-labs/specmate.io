@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import UsagePeriod, Workspace
 
 USAGE_EVENT_NAME = os.environ.get("STRIPE_USAGE_EVENT_NAME", "published_item")
+USAGE_METER_ID = os.environ.get("STRIPE_USAGE_METER_ID", "")
 
 
 class BillingNotConfiguredError(Exception):
@@ -69,3 +70,29 @@ async def report_usage_period(session: AsyncSession, usage_period: UsagePeriod) 
     usage_period.reportedCount = usage_period.publishedItemCount
     usage_period.reportedToStripeAt = datetime.now(UTC).replace(tzinfo=None)
     return delta
+
+
+async def fetch_stripe_reported_total(workspace: Workspace, usage_period: UsagePeriod) -> int:
+    """Reads back Stripe's own recorded total for this workspace/period via the
+    Billing Meter Event Summaries API (Issue 12.5) — the read-side counterpart
+    to report_usage_period's write-side meter_events.create call. Used only by
+    reconciliation; never called from the normal reporting path. Raises
+    BillingNotConfiguredError if Stripe or the meter ID isn't configured, same
+    fail-loud posture as report_usage_period."""
+    if not workspace.stripeCustomerId:
+        raise ValueError(f"Workspace {workspace.id} has no stripeCustomerId — nothing to reconcile")
+    if not USAGE_METER_ID:
+        raise BillingNotConfiguredError("STRIPE_USAGE_METER_ID is not set.")
+    client = _client()
+
+    start_ts = int(usage_period.periodStart.replace(tzinfo=UTC).timestamp())
+    end_ts = int(usage_period.periodEnd.replace(tzinfo=UTC).timestamp())
+    summaries = client.v1.billing.meters.event_summaries.list(
+        id=USAGE_METER_ID,
+        params={
+            "customer": workspace.stripeCustomerId,
+            "start_time": start_ts,
+            "end_time": end_ts,
+        },
+    )
+    return int(sum(s.aggregated_value for s in summaries.data))
