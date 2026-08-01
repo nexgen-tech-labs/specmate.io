@@ -105,7 +105,12 @@ async def reconcile_usage(
     for usage_period in usage_periods:
         try:
             flag = await reconcile_workspace_usage(session, usage_period)
-        except BillingNotConfiguredError:
+        except (BillingNotConfiguredError, ValueError):
+            # ValueError covers fetch_stripe_reported_total's own "no
+            # stripeCustomerId" guard — unreachable today since
+            # reconcile_workspace_usage already short-circuits on that same
+            # condition before calling it, but caught here defensively in
+            # case a future call path skips that upstream guard.
             stripe_reconciliation_skipped = True
             continue
         if flag is not None:
