@@ -15,12 +15,16 @@ Reporting the count to Stripe as a usage record is a separate step
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DraftItem, Project, PublishedItem, UsagePeriod, Workspace
+from app.services.billing.stripe_reporting import report_usage_period
+
+logger = logging.getLogger(__name__)
 
 
 def current_period_bounds(now: datetime | None = None) -> tuple[datetime, datetime]:
@@ -96,3 +100,24 @@ async def meter_all_workspaces_for_current_period(session: AsyncSession) -> list
         row = await meter_workspace_for_period(session, workspace_id, period_start, period_end)
         rows.append(row)
     return rows
+
+
+async def report_workspace_current_usage(session: AsyncSession, workspace_id: str) -> None:
+    """Best-effort near-real-time reporting (Issue 12.5): meters + reports just
+    this one workspace's current period, called inline right after a publish.
+    Never raises — a reporting hiccup must not fail the publish request that
+    triggered it. The periodic /billing/meter-usage sweep is the backstop that
+    catches anything an inline report missed — this function is an
+    optimization for freshness, not the sole source of truth for whether usage
+    eventually gets reported. This also covers BillingNotConfiguredError (raised
+    when STRIPE_SECRET_KEY is unset), so local/test/dev environments without
+    Stripe configured don't spam logs on every publish."""
+    try:
+        period_start, period_end = current_period_bounds()
+        usage_period = await meter_workspace_for_period(
+            session, workspace_id, period_start, period_end
+        )
+        await report_usage_period(session, usage_period)
+        await session.commit()
+    except Exception:
+        logger.exception("Inline usage reporting failed for workspace %s", workspace_id)

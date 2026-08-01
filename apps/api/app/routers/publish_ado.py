@@ -27,6 +27,7 @@ from app.models import (
     Workspace,
 )
 from app.services.audit import make_rate_limit_recorder, record_audit_event
+from app.services.billing.metering import report_workspace_current_usage
 from app.services.connectors.ado_auth import AdoConnection, check_connection_health, get_ado_connection
 from app.services.connectors.ado_publish import (
     AdoPublishOutcome,
@@ -448,6 +449,10 @@ async def publish_to_ado(
             )
         item.updatedAt = now
         await session.commit()
+
+    # Issue 12.5: near-real-time usage reporting — best-effort, never blocks the
+    # publish response even if Stripe reporting fails or isn't configured.
+    await report_workspace_current_usage(session, workspace.id)
 
     return AdoPublishResponse(
         results=results,

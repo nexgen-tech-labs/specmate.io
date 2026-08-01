@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.core.config import settings
 from app.models import DraftItem, Project, PublishedItem, UsagePeriod, Workspace
-from app.services.billing.metering import current_period_bounds, meter_workspace_for_period
+from app.services.billing.metering import (
+    current_period_bounds,
+    meter_workspace_for_period,
+    report_workspace_current_usage,
+)
 from tests.audit_cleanup import purge_audit_events
 
 
@@ -138,5 +142,58 @@ def test_metering_is_idempotent_per_period_not_duplicated() -> None:
 
     row_count = asyncio.run(run_twice())
     assert row_count == 1  # upserted, not duplicated
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_report_workspace_current_usage_meters_and_reports_without_raising(monkeypatch) -> None:
+    ids = asyncio.run(_fixture())
+
+    calls: list[object] = []
+
+    async def fake_report(session: AsyncSession, usage_period: UsagePeriod) -> int:
+        calls.append(usage_period.workspaceId)
+        return 1
+
+    monkeypatch.setattr("app.services.billing.metering.report_usage_period", fake_report)
+
+    async def run() -> None:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                await report_workspace_current_usage(session, str(ids["workspace_id"]))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+    assert calls == [ids["workspace_id"]]
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_report_workspace_current_usage_never_raises_on_reporting_failure(
+    monkeypatch, caplog
+) -> None:
+    ids = asyncio.run(_fixture())
+
+    async def fake_report_raises(session: AsyncSession, usage_period: UsagePeriod) -> int | None:
+        raise RuntimeError("stripe is down")
+
+    monkeypatch.setattr(
+        "app.services.billing.metering.report_usage_period", fake_report_raises
+    )
+
+    async def run() -> None:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                # Must not raise — best-effort, never blocks the publish flow.
+                await report_workspace_current_usage(session, str(ids["workspace_id"]))
+        finally:
+            await engine.dispose()
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(run())
+    assert "Inline usage reporting failed" in caplog.text
 
     asyncio.run(_cleanup(ids))

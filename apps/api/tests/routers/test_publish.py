@@ -21,6 +21,7 @@ from app.models import (
     PublishedItem,
     PublishMapping,
     TraceLink,
+    UsagePeriod,
     Workspace,
 )
 from app.routers.publish import PublishGateway, get_publish_gateway
@@ -208,6 +209,11 @@ async def _cleanup(ids: dict[str, str], extra_item_ids: list[str] | None = None)
             )
             await session.execute(delete(Project).where(Project.id == ids["project_id"]))
             await purge_audit_events(session, ids["workspace_id"])
+            # Issue 12.5: publish now inline-meters usage, which upserts a UsagePeriod
+            # row for the workspace — must be cleared before the workspace FK delete.
+            await session.execute(
+                delete(UsagePeriod).where(UsagePeriod.workspaceId == ids["workspace_id"])
+            )
             await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
             await session.commit()
     finally:
@@ -288,6 +294,48 @@ def test_publish_orders_hierarchy_links_parents_and_writes_back_keys() -> None:
 
     count, first_key = asyncio.run(check_writeback())
     assert count == 2 and first_key.startswith("KAN-")
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_publish_succeeds_even_when_stripe_is_not_configured() -> None:
+    """Issue 12.5: publish now inline-reports usage to Stripe after a successful
+    publish. STRIPE_SECRET_KEY isn't set in the test env, so the inline report
+    hits BillingNotConfiguredError internally — this locks in that the publish
+    request still succeeds (200, PublishedItem created) despite that."""
+    ids = asyncio.run(_fixture())
+    fake = _FakeJira()
+    app.dependency_overrides[get_publish_gateway] = fake.gateway
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        response = client.post(
+            f"/projects/{ids['project_id']}/publish/jira",
+            json={"item_ids": [ids["epic_id"]]},
+        )
+    finally:
+        app.dependency_overrides.pop(get_publish_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["succeeded"] == 1 and body["failed"] == 0
+
+    async def check_published() -> int:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                rows = (
+                    await session.execute(
+                        select(PublishedItem).where(PublishedItem.draftItemId == ids["epic_id"])
+                    )
+                ).scalars().all()
+                return len(rows)
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(check_published()) == 1
 
     asyncio.run(_cleanup(ids))
 

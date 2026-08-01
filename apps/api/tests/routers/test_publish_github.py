@@ -14,7 +14,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import AuditEvent, DraftItem, Project, PublishedItem, PublishMapping, TraceLink, Workspace
+from app.models import (
+    AuditEvent,
+    DraftItem,
+    Project,
+    PublishedItem,
+    PublishMapping,
+    TraceLink,
+    UsagePeriod,
+    Workspace,
+)
 from app.routers.publish_github import GitHubPublishGateway, get_github_gateway
 from app.services.connectors.github_auth import TokenConnection
 from app.services.connectors.github_publish import GitHubPublishCandidate, GitHubPublishOutcome
@@ -158,6 +167,11 @@ async def _cleanup(ids: dict[str, str]) -> None:
             await session.execute(delete(PublishMapping).where(PublishMapping.projectId == ids["project_id"]))
             await session.execute(delete(Project).where(Project.id == ids["project_id"]))
             await purge_audit_events(session, ids["workspace_id"])
+            # Issue 12.5: publish now inline-meters usage, which upserts a UsagePeriod
+            # row for the workspace — must be cleared before the workspace FK delete.
+            await session.execute(
+                delete(UsagePeriod).where(UsagePeriod.workspaceId == ids["workspace_id"])
+            )
             await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
             await session.commit()
     finally:
@@ -252,6 +266,33 @@ def test_coding_agent_mode_includes_suggested_file_references() -> None:
     assert response.status_code == 200
     assert response.json()["succeeded"] == 1
     assert fake.created[0]["title"] == "payments module epic"
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_publish_succeeds_even_when_stripe_is_not_configured() -> None:
+    """Issue 12.5: publish now inline-reports usage to Stripe after a successful
+    publish. STRIPE_SECRET_KEY isn't set in the test env, so the inline report
+    hits BillingNotConfiguredError internally — this locks in that the publish
+    request still succeeds (200, PublishedItem created) despite that."""
+    ids = asyncio.run(_fixture())
+    fake = _FakeGitHub()
+    app.dependency_overrides[get_github_gateway] = fake.gateway
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        response = client.post(
+            f"/projects/{ids['project_id']}/publish/github", json={"item_ids": [ids["epic_id"]]}
+        )
+    finally:
+        app.dependency_overrides.pop(get_github_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["succeeded"] == 1 and body["failed"] == 0
+    assert len(fake.created) == 1
 
     asyncio.run(_cleanup(ids))
 
