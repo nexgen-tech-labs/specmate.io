@@ -440,6 +440,26 @@ class UsagePeriod(Base):
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
 
+class UsageReconciliationFlag(Base):
+    """One row per detected mismatch between what SpecMate recorded and what
+    Stripe actually has on file for a billing period (Issue 12.5) —
+    structurally parallel to DriftFlag (Issue 9.5): flag on mismatch, never
+    silently auto-correct, a human resolves. "Resolved" is inferred from
+    resolvedAt being non-null, same convention as DriftFlag's
+    resolution-nullability."""
+
+    __tablename__ = "UsageReconciliationFlag"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    usagePeriodId: Mapped[str] = mapped_column(ForeignKey("UsagePeriod.id"), unique=True)
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    internalCount: Mapped[int] = mapped_column(Integer)
+    stripeCount: Mapped[int] = mapped_column(Integer)
+    detectedAt: Mapped[datetime] = mapped_column(DateTime)
+    resolvedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolvedByUserId: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
 class ApiRateLimitCounter(Base):
     """Per-workspace, per-minute-window request counter (Issue 12.1). One row per
     (workspaceId, windowStart); requestCount is incremented atomically via

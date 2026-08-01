@@ -194,6 +194,7 @@ model Workspace {
   usagePeriods              UsagePeriod[]
   atlassianConnectInstalls  AtlassianConnectInstall[]
   apiRateLimitCounters      ApiRateLimitCounter[]
+  usageReconciliationFlags  UsageReconciliationFlag[]
 }
 
 // One row per Jira Cloud site that has installed the SpecMate Atlassian
@@ -245,7 +246,28 @@ model UsagePeriod {
 
   workspace Workspace @relation(fields: [workspaceId], references: [id])
 
+  reconciliationFlag UsageReconciliationFlag?
+
   @@unique([workspaceId, periodStart])
+}
+
+// One row per detected mismatch between what SpecMate recorded and what Stripe
+// actually has on file for a billing period (Issue 12.5) — structurally
+// parallel to DriftFlag (Issue 9.5): flag on mismatch, never silently
+// auto-correct, a human resolves. "Resolved" is inferred from resolvedAt
+// being non-null, same convention as DriftFlag's resolution-nullability.
+model UsageReconciliationFlag {
+  id              String    @id @default(cuid())
+  usagePeriodId   String    @unique
+  workspaceId     String
+  internalCount   Int
+  stripeCount     Int
+  detectedAt      DateTime  @default(now())
+  resolvedAt      DateTime?
+  resolvedByUserId String?
+
+  usagePeriod UsagePeriod @relation(fields: [usagePeriodId], references: [id])
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id])
 }
 
 model ApiRateLimitCounter {
