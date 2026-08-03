@@ -137,4 +137,31 @@ describe('DELETE /api/account/connections/[accountId]', () => {
     const stillThere = await prisma.account.findUnique({ where: { id: soleAccount.id } });
     expect(stillThere).not.toBeNull();
   });
+
+  it("two concurrent unlinks of a no-password user's last two accounts: exactly one succeeds, one is blocked", async () => {
+    const user = await prisma.user.create({
+      data: { email: `del-race-${Date.now()}@test.local`, name: 'Race', passwordHash: null },
+    });
+    const raceAccountA = await prisma.account.create({
+      data: { provider: 'github', providerAccountId: `gh-race-a-${Date.now()}`, userId: user.id },
+    });
+    const raceAccountB = await prisma.account.create({
+      data: { provider: 'google', providerAccountId: `g-race-b-${Date.now()}`, userId: user.id },
+    });
+    currentSession = { user: { id: user.id } };
+
+    const [resA, resB] = await Promise.all([
+      DELETE(makeRequest(), { params: Promise.resolve({ accountId: raceAccountA.id }) }),
+      DELETE(makeRequest(), { params: Promise.resolve({ accountId: raceAccountB.id }) }),
+    ]);
+
+    const statuses = [resA.status, resB.status].sort();
+    expect(statuses).toEqual([200, 409]); // exactly one wins, one is blocked — never both 200
+
+    const remaining = await prisma.account.count({ where: { userId: user.id } });
+    expect(remaining).toBe(1); // never left with zero sign-in methods
+
+    await prisma.account.deleteMany({ where: { userId: user.id } });
+    await prisma.user.delete({ where: { id: user.id } });
+  });
 });
