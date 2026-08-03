@@ -204,6 +204,68 @@ describe('resolveOAuthSignIn', () => {
     createdAccountIds.push(...accounts.map((a) => a.id));
     expect(accounts).toHaveLength(2);
   });
+
+  it('matches an existing User by email case-insensitively', async () => {
+    const email = `Oauth-Case-${Date.now()}@Test.Local`;
+    const existingUser = await prisma.user.create({
+      data: { name: 'Existing', email: email.toLowerCase(), passwordHash: 'hashed' },
+    });
+    createdUserIds.push(existingUser.id);
+
+    const result = await resolveOAuthSignIn({
+      provider: 'google',
+      providerAccountId: `g-case-${Date.now()}`,
+      email, // deliberately mixed-case, as a provider might return
+      name: 'Existing',
+      emailVerifiedByProvider: true,
+    });
+    expect(result.outcome).toBe('signed_in');
+    if (result.outcome === 'signed_in') {
+      expect(result.userId).toBe(existingUser.id);
+      const account = await prisma.account.findFirstOrThrow({ where: { userId: existingUser.id } });
+      createdAccountIds.push(account.id);
+    }
+    const userCount = await prisma.user.count({ where: { email: email.toLowerCase() } });
+    expect(userCount).toBe(1); // no case-mismatched duplicate created
+  });
+
+  it('two concurrent sign-ins for the same brand-new email both resolve to one User, not a crash', async () => {
+    const email = `oauth-race-${Date.now()}@test.local`;
+    const [first, second] = await Promise.all([
+      resolveOAuthSignIn({
+        provider: 'github',
+        providerAccountId: `gh-race-a-${Date.now()}`,
+        email,
+        name: 'Race User',
+        emailVerifiedByProvider: true,
+      }),
+      resolveOAuthSignIn({
+        provider: 'google',
+        providerAccountId: `g-race-b-${Date.now()}`,
+        email,
+        name: 'Race User',
+        emailVerifiedByProvider: true,
+      }),
+    ]);
+    expect(first.outcome).toBe('signed_in');
+    expect(second.outcome).toBe('signed_in');
+    if (first.outcome === 'signed_in' && second.outcome === 'signed_in') {
+      expect(first.userId).toBe(second.userId); // both landed on the same User, not two
+      createdUserIds.push(first.userId);
+      const accounts = await prisma.account.findMany({ where: { userId: first.userId } });
+      createdAccountIds.push(...accounts.map((a) => a.id));
+      const membership = await prisma.workspaceMember.findFirstOrThrow({
+        where: { userId: first.userId },
+      });
+      createdWorkspaceIds.push(membership.workspaceId);
+      const orgMembership = await prisma.organizationMember.findFirstOrThrow({
+        where: { userId: first.userId },
+      });
+      createdOrgIds.push(orgMembership.organizationId);
+    }
+    const userCount = await prisma.user.count({ where: { email } });
+    expect(userCount).toBe(1); // no duplicate User from the race
+  });
 });
 
 describe('resolveUserIdForOAuthAccount', () => {

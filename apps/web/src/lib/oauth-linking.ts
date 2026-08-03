@@ -27,6 +27,12 @@ type ResolveOAuthSignInResult =
 export async function resolveOAuthSignIn(
   input: ResolveOAuthSignInInput,
 ): Promise<ResolveOAuthSignInResult> {
+  // Providers aren't guaranteed to normalize email casing consistently
+  // (existing /api/signup has the same gap for password signups) — lowercase
+  // here so an OAuth sign-in reliably matches an existing account regardless
+  // of casing, rather than silently creating a duplicate User.
+  const email = input.email.toLowerCase();
+
   const existingAccount = await prisma.account.findUnique({
     where: {
       provider_providerAccountId: {
@@ -39,42 +45,70 @@ export async function resolveOAuthSignIn(
     return { outcome: 'signed_in', userId: existingAccount.userId };
   }
 
-  const matchingUser = await prisma.user.findUnique({ where: { email: input.email } });
+  const matchingUser = await prisma.user.findUnique({ where: { email } });
 
   if (!matchingUser) {
-    const { user } = await createTenantForNewUser({
-      name: input.name,
-      email: input.email,
-      passwordHash: null,
-      orgName: `${input.name}'s Organization`,
-      orgSize: 'SOLO',
-      workspaceName: `${input.name}'s Workspace`,
-    });
-    await prisma.account.create({
-      data: {
-        provider: input.provider,
-        providerAccountId: input.providerAccountId,
-        userId: user.id,
-      },
-    });
-    if (input.emailVerifiedByProvider) {
-      await prisma.user.update({ where: { id: user.id }, data: { emailVerified: new Date() } });
+    let user;
+    try {
+      ({ user } = await createTenantForNewUser({
+        name: input.name,
+        email,
+        passwordHash: null,
+        orgName: `${input.name}'s Organization`,
+        orgSize: 'SOLO',
+        workspaceName: `${input.name}'s Workspace`,
+      }));
+    } catch (err) {
+      // Two concurrent sign-ins for the same brand-new email (double-click,
+      // two tabs) can both pass the !matchingUser check above — the loser
+      // hits User.email's unique constraint. Recover by re-resolving against
+      // the row the winner just created, rather than surfacing a raw 500.
+      if (isUniqueConstraintViolation(err)) {
+        const winner = await prisma.user.findUnique({ where: { email } });
+        if (winner) return linkOrReuseAccount(input.provider, input.providerAccountId, winner.id);
+      }
+      throw err;
     }
-    return { outcome: 'signed_in', userId: user.id };
+    return linkOrReuseAccount(input.provider, input.providerAccountId, user.id, {
+      markVerified: input.emailVerifiedByProvider,
+    });
   }
 
   if (input.emailVerifiedByProvider) {
-    await prisma.account.create({
-      data: {
-        provider: input.provider,
-        providerAccountId: input.providerAccountId,
-        userId: matchingUser.id,
-      },
-    });
-    return { outcome: 'signed_in', userId: matchingUser.id };
+    return linkOrReuseAccount(input.provider, input.providerAccountId, matchingUser.id);
   }
 
   return { outcome: 'blocked_existing_account' };
+}
+
+function isUniqueConstraintViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === 'P2002'
+  );
+}
+
+// Creates the Account row for a resolved userId, tolerating the case where a
+// concurrent request already created it (same double-click/two-tab race as
+// above, but on Account's (provider, providerAccountId) unique constraint
+// instead of User.email).
+async function linkOrReuseAccount(
+  provider: string,
+  providerAccountId: string,
+  userId: string,
+  options?: { markVerified?: boolean },
+): Promise<ResolveOAuthSignInResult> {
+  try {
+    await prisma.account.create({ data: { provider, providerAccountId, userId } });
+  } catch (err) {
+    if (!isUniqueConstraintViolation(err)) throw err;
+  }
+  if (options?.markVerified) {
+    await prisma.user.update({ where: { id: userId }, data: { emailVerified: new Date() } });
+  }
+  return { outcome: 'signed_in', userId };
 }
 
 /** Used by the jwt callback to resolve the internal User.id for an OAuth
