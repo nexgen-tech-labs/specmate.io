@@ -8,6 +8,7 @@ function LoginFormInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get('callbackUrl') ?? '/';
+  const oauthError = searchParams.get('error');
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -31,6 +32,13 @@ function LoginFormInner() {
       }}
       className="rounded-lg border border-line bg-panel p-8"
     >
+      {oauthError === 'AccountExists' ? (
+        <p className="mb-4 text-sm text-red">
+          An account with this email already exists. Sign in with your password, then link this
+          provider from account settings.
+        </p>
+      ) : null}
+
       <label htmlFor="email" className="mb-2 block text-base font-semibold text-ink">
         Work email
       </label>
@@ -65,6 +73,30 @@ function LoginFormInner() {
       >
         {submitting ? 'Signing in…' : 'Sign in →'}
       </button>
+
+      <div className="mt-6 flex flex-col gap-3">
+        <button
+          type="button"
+          onClick={() => signIn('github', { callbackUrl })}
+          className="w-full rounded-md border border-line bg-paper px-5 py-3 text-base font-semibold text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cobalt"
+        >
+          Continue with GitHub
+        </button>
+        <button
+          type="button"
+          onClick={() => signIn('google', { callbackUrl })}
+          className="w-full rounded-md border border-line bg-paper px-5 py-3 text-base font-semibold text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cobalt"
+        >
+          Continue with Google
+        </button>
+        <button
+          type="button"
+          onClick={() => signIn('microsoft-entra-id', { callbackUrl })}
+          className="w-full rounded-md border border-line bg-paper px-5 py-3 text-base font-semibold text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cobalt"
+        >
+          Continue with Microsoft
+        </button>
+      </div>
     </form>
   );
 }
