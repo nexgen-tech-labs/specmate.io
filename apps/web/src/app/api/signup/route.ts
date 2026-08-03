@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { hashPassword } from '@/lib/password';
+import { createTenantForNewUser } from '@/lib/create-tenant';
 import type { OrgSize } from '@prisma/client';
 
 const VALID_ORG_SIZES: OrgSize[] = ['SOLO', 'SMALL', 'MEDIUM', 'LARGE', 'ENTERPRISE'];
@@ -60,23 +61,13 @@ export async function POST(request: Request) {
   // org OWNER + workspace ADMIN. Organization now carries its own name + size
   // as collected by the 4-step signup form, rather than defaulting to the
   // workspace's name.
-  const { user, workspace } = await prisma.$transaction(async (tx) => {
-    const user = await tx.user.create({
-      data: { name: body.name, email: body.email, passwordHash },
-    });
-    const organization = await tx.organization.create({
-      data: { name: body.orgName, size: body.orgSize },
-    });
-    const workspace = await tx.workspace.create({
-      data: { name: body.workspaceName, organizationId: organization.id },
-    });
-    await tx.organizationMember.create({
-      data: { organizationId: organization.id, userId: user.id, role: 'OWNER' },
-    });
-    await tx.workspaceMember.create({
-      data: { workspaceId: workspace.id, userId: user.id, role: 'ADMIN' },
-    });
-    return { user, workspace };
+  const { user, workspace } = await createTenantForNewUser({
+    name: body.name,
+    email: body.email,
+    passwordHash,
+    orgName: body.orgName,
+    orgSize: body.orgSize,
+    workspaceName: body.workspaceName,
   });
 
   // Signup-time team invites (step 4 of the redesigned flow) reuse the exact
