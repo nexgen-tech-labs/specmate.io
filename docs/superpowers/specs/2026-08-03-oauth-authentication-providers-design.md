@@ -88,11 +88,15 @@ On OAuth sign-in (account, profile):
 
 ### 4. Settings — link/unlink section
 
-A new "Connected accounts" section on the account/profile settings surface (exact page location confirmed during plan research — may be new if no such page exists yet, per the follow-up issue's point 4).
+**Simplified during planning research**: Auth.js v5 has no database adapter in this app, so there's no built-in account-linking machinery — the `signIn` callback already does 100% of the linking logic manually (confirmed by reading `@auth/core`'s internals: adapter-driven `linkAccount()` is a complete no-op without an adapter). Implementing a "click Link Google while already signed in" flow would require reading the session from inside the `signIn` callback via raw request cookies (NOT via `auth()`, which risks recursion since `signIn` runs as part of the auth request lifecycle itself) — real added complexity and auth-surface risk for a secondary feature. Decision: drop the in-session "link" button/flow entirely.
 
-- "Link Google/GitHub/Microsoft" buttons initiate the OAuth flow with an explicit linking intent (e.g. a `callbackUrl` carrying a `link=true` marker, or a dedicated linking sub-route) so the `signIn` callback's handling, when invoked for an already-authenticated session, adds the `Account` row to the CURRENT session's user rather than running the "new user or match by email" branch.
+A new "Connected accounts" section on the account/profile settings surface (exact page location confirmed during plan research — may be new if no such page exists yet, per the follow-up issue's point 4) instead:
+
+- Lists currently-connected providers (query `Account` rows for the current user) — read-only display, no linking button.
 - "Unlink" removes an `Account` row, but is blocked (with a clear error) if it's the user's only sign-in method — i.e., `passwordHash === null` AND this is their only linked `Account` — to guarantee a user can never be locked out of their own account.
-- Lists currently-connected providers with a simple, unstyled-is-fine-for-now list + buttons — no design system work beyond matching existing settings page conventions.
+- To add a NEW provider to an existing account: the user signs out and signs back in via that provider with a matching, provider-verified email — this hits the SAME auto-link path already designed for returning users (§3), requiring no additional code. The settings page's copy explains this ("to connect Google, sign out and sign back in with Google using the same email").
+
+This still satisfies the AC's "vice versa" (password user can end up with an OAuth identity linked to their account) without adding a second, riskier code path alongside the already-designed auto-link flow.
 
 ### 5. Shared org/workspace-creation helper
 
