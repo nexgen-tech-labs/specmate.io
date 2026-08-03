@@ -20,7 +20,7 @@ export default async function AccountSettingsPage() {
   ]);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-paper px-6">
+    <div className="flex items-center justify-center px-6 py-16">
       <div className="w-full max-w-md">
         <div className="mb-8 text-center">
           <h1 className="text-3xl font-bold tracking-tight text-ink">Account settings</h1>

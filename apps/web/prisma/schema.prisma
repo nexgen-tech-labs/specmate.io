@@ -55,6 +55,7 @@ model Organization {
 
   members    OrganizationMember[]
   workspaces Workspace[]
+  invites    OrganizationInvite[]
 }
 
 model OrganizationMember {
@@ -296,6 +297,7 @@ model User {
   reviewDecisions  ReviewDecision[]
   auditEvents      AuditEvent[]
   sentInvites      WorkspaceInvite[]
+  sentOrgInvites   OrganizationInvite[]
 }
 
 // Login-identity linking only (Issue 12.8) — no access/refresh tokens stored,
@@ -652,6 +654,22 @@ model WorkspaceInvite {
 
   workspace  Workspace @relation(fields: [workspaceId], references: [id])
   invitedBy  User      @relation(fields: [invitedByUserId], references: [id])
+}
+
+model OrganizationInvite {
+  id              String       @id @default(cuid())
+  organizationId  String
+  email           String
+  role            OrgRole
+  token           String       @unique
+  status          InviteStatus @default(PENDING)
+  invitedByUserId String
+  expiresAt       DateTime
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  invitedBy    User         @relation(fields: [invitedByUserId], references: [id])
 }
 
 // Join record proving full traceability: Source -> RawRequirement -> DraftItem -> PublishedItem.
