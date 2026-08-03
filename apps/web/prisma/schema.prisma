@@ -281,19 +281,38 @@ model ApiRateLimitCounter {
 }
 
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
-  name         String
-  passwordHash String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String
+  passwordHash  String?
+  emailVerified DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
+  accounts         Account[]
   memberships      WorkspaceMember[]
   orgMemberships   OrganizationMember[]
   teamMemberships  TeamMember[]
   reviewDecisions  ReviewDecision[]
   auditEvents      AuditEvent[]
   sentInvites      WorkspaceInvite[]
+}
+
+// Login-identity linking only (Issue 12.8) — no access/refresh tokens stored,
+// since this app never needs to call GitHub/Google/Microsoft APIs on the
+// user's behalf (that's the separate, unrelated connector-OAuth surface in
+// Epics 5-7 — see Issue #111 for why these two "OAuth" concepts must stay
+// distinct). One row per (provider, providerAccountId) a user has linked.
+model Account {
+  id                String   @id @default(cuid())
+  userId            String
+  provider          String
+  providerAccountId String
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([provider, providerAccountId])
 }
 
 model WorkspaceMember {
