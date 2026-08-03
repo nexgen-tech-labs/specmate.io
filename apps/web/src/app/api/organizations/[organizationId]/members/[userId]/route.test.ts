@@ -152,6 +152,62 @@ describe('DELETE /api/organizations/[organizationId]/members/[userId] — offboa
     }
   });
 
+  it('returns 409 and does not remove the last OWNER of an organization, even self-offboarding', async () => {
+    const soleOwnerOrg = await prisma.organization.create({ data: { name: 'Sole Owner Org' } });
+    const soleOwner = await prisma.user.create({
+      data: { email: `sole-owner-${Date.now()}@test.local`, name: 'Sole', passwordHash: 'x' },
+    });
+    await prisma.organizationMember.create({
+      data: { organizationId: soleOwnerOrg.id, userId: soleOwner.id, role: 'OWNER' },
+    });
+
+    currentSession = { user: { id: soleOwner.id } };
+    const res = await DELETE(makeRequest(), {
+      params: Promise.resolve({ organizationId: soleOwnerOrg.id, userId: soleOwner.id }),
+    });
+    expect(res.status).toBe(409);
+
+    const stillThere = await prisma.organizationMember.findUnique({
+      where: { organizationId_userId: { organizationId: soleOwnerOrg.id, userId: soleOwner.id } },
+    });
+    expect(stillThere).not.toBeNull();
+
+    await prisma.organizationMember.deleteMany({ where: { organizationId: soleOwnerOrg.id } });
+    await prisma.organization.delete({ where: { id: soleOwnerOrg.id } });
+    await prisma.user.delete({ where: { id: soleOwner.id } });
+  });
+
+  it('allows removing an OWNER when another OWNER remains', async () => {
+    const twoOwnerOrg = await prisma.organization.create({ data: { name: 'Two Owner Org' } });
+    const ownerOne = await prisma.user.create({
+      data: { email: `owner-one-${Date.now()}@test.local`, name: 'One', passwordHash: 'x' },
+    });
+    const ownerTwo = await prisma.user.create({
+      data: { email: `owner-two-${Date.now()}@test.local`, name: 'Two', passwordHash: 'x' },
+    });
+    await prisma.organizationMember.create({
+      data: { organizationId: twoOwnerOrg.id, userId: ownerOne.id, role: 'OWNER' },
+    });
+    await prisma.organizationMember.create({
+      data: { organizationId: twoOwnerOrg.id, userId: ownerTwo.id, role: 'OWNER' },
+    });
+
+    currentSession = { user: { id: ownerOne.id } };
+    const res = await DELETE(makeRequest(), {
+      params: Promise.resolve({ organizationId: twoOwnerOrg.id, userId: ownerTwo.id }),
+    });
+    expect(res.status).toBe(200);
+
+    const removed = await prisma.organizationMember.findUnique({
+      where: { organizationId_userId: { organizationId: twoOwnerOrg.id, userId: ownerTwo.id } },
+    });
+    expect(removed).toBeNull();
+
+    await prisma.organizationMember.deleteMany({ where: { organizationId: twoOwnerOrg.id } });
+    await prisma.organization.delete({ where: { id: twoOwnerOrg.id } });
+    await prisma.user.deleteMany({ where: { id: { in: [ownerOne.id, ownerTwo.id] } } });
+  });
+
   it('returns 404 if the target userId has no organization membership', async () => {
     currentSession = { user: { id: owner.id } };
     const neverMember = await prisma.user.create({

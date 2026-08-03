@@ -27,6 +27,22 @@ export async function DELETE(_request: Request, { params }: Params) {
     );
   }
 
+  // Never leave an org with zero OWNERs — that org becomes permanently
+  // unable to perform OWNER-gated actions (billing, workspace lifecycle),
+  // since no route lets anyone self-promote to OWNER. Applies whether an
+  // OWNER is offboarding themselves or another OWNER.
+  if (targetMembership.role === 'OWNER') {
+    const ownerCount = await prisma.organizationMember.count({
+      where: { organizationId, role: 'OWNER' },
+    });
+    if (ownerCount <= 1) {
+      return NextResponse.json(
+        { error: 'Cannot remove the last owner of an organization.' },
+        { status: 409 },
+      );
+    }
+  }
+
   const workspaces = await prisma.workspace.findMany({
     where: { organizationId },
     select: { id: true },
