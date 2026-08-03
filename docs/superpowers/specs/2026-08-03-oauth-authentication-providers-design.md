@@ -59,32 +59,47 @@ Add `GitHub`, `Google`, `MicrosoftEntraID` from `next-auth/providers/*`, each wi
 
 Env vars (new, `.env.example`): `GITHUB_OAUTH_CLIENT_ID`/`GITHUB_OAUTH_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, `MICROSOFT_ENTRA_ID_CLIENT_ID`/`MICROSOFT_ENTRA_ID_CLIENT_SECRET` (+ `MICROSOFT_ENTRA_ID_TENANT_ID` if Auth.js's provider requires it — confirm during implementation). Named distinctly from any existing `GITHUB_TOKEN`/`ADO`-connector env vars to avoid the naming collision flagged in the follow-up issue.
 
-### 3. `signIn` callback — the core account-linking logic
+### 3. Account-linking logic — split across `signIn` and `jwt` callbacks
+
+**Verified directly against `@auth/core@0.41.2`'s source** (`lib/actions/callback/{index,handle-login}.js`), since this app runs with no database adapter and the exact callback data flow matters for correctness: `signIn` runs first and can only approve (`true`), reject (`false`, throws `AccessDenied`), or redirect (return a URL string) — it CANNOT change what `user` object flows downstream. Without an adapter, `handleLoginOrRegister` (Auth.js's built-in post-`signIn` step) is a hard-coded no-op that returns `{ user: profile, account }` verbatim — the RAW provider profile, not a database-resolved user. That raw profile (with the provider's own opaque `id`, e.g. a GitHub numeric ID) is what gets passed into `jwt({ user, account, profile, trigger })` to build `token.sub`. So: **all DB reads/writes (lookup, create, link) happen in `signIn`; final internal-`User.id` resolution for `token.sub` happens separately in `jwt`**, since only `jwt` actually controls the token's `sub` claim.
 
 ```
-On Credentials sign-in: unchanged.
+signIn({ account, profile }):
+  if account.provider === "credentials": return true  # unchanged existing behavior
 
-On OAuth sign-in (account, profile):
-  existing = Account.findUnique({ provider, providerAccountId: account.providerAccountId })
-  if existing: proceed as existing.userId
+  # OAuth path
+  existing = Account.findUnique({ provider: account.provider, providerAccountId: account.providerAccountId })
+  if existing: return true  # already linked, proceed
 
   matchingUser = User.findUnique({ email: profile.email })
   if not matchingUser:
     # New signup — reuse the shared org/workspace creation helper
-    create User (passwordHash: null, emailVerified: now if provider asserts verified else null)
-    create Account (provider, providerAccountId, userId)
+    user = create User (email, name, passwordHash: null, emailVerified: providerAssertsVerified(profile) ? now : null)
+    create Account (provider: account.provider, providerAccountId: account.providerAccountId, userId: user.id)
     create Organization + Workspace + OWNER/ADMIN memberships (shared helper, extracted from /api/signup)
-    proceed as new user
+    return true
 
-  if matchingUser and provider asserts email verified:
-    create Account (provider, providerAccountId, userId: matchingUser.id)  # auto-link
-    proceed as matchingUser
+  if providerAssertsVerified(profile):
+    create Account (provider: account.provider, providerAccountId: account.providerAccountId, userId: matchingUser.id)  # auto-link
+    return true
 
-  else:  # matchingUser exists, email not verified-asserted by provider
-    reject sign-in, redirect to /login?error=AccountExists
+  else:  # matchingUser exists, provider doesn't assert this email is verified
+    return "/login?error=AccountExists"  # signIn callback CAN return a redirect URL string
+
+jwt({ token, user, account, profile, trigger }):
+  if trigger is "signIn" or "signUp":
+    if account.provider === "credentials":
+      token.sub = user.id  # unchanged — Credentials' authorize() already returns the real DB id
+    else:
+      # OAuth: re-resolve the internal User.id via the Account row signIn() just
+      # confirmed exists (created-or-matched above) — `user.id` here is the raw
+      # provider profile id, NOT our DB id, and must never be trusted directly.
+      resolvedAccount = Account.findUniqueOrThrow({ provider: account.provider, providerAccountId: account.providerAccountId })
+      token.sub = resolvedAccount.userId
+  return token
 ```
 
-`jwt` callback: unchanged in shape — still sets `token.sub` from the resolved `user.id`, now fed by either path above.
+This two-callback split (verified against source, not assumed) is the one place this design differs from a naive "just do everything in `signIn`" sketch — that naive version would silently set `token.sub` to a GitHub/Google numeric ID instead of the internal cuid, breaking every `requireWorkspaceRole`/`requireProjectRole` call downstream. Getting this exact split right is the crux of the implementation.
 
 ### 4. Settings — link/unlink section
 
