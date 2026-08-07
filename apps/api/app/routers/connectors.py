@@ -32,6 +32,7 @@ from app.services.connectors.confluence import (
 )
 from app.services.connectors.github import fetch_github_issues
 from app.services.connectors.jira import fetch_jira_issues
+from app.services.connectors.registry import CONNECTOR_REGISTRY
 from app.services.connectors.slack import (
     fetch_slack_messages,
     fetch_user_names,
@@ -219,6 +220,135 @@ async def sync_confluence_page(
         status=SourceStatus.PARSED.value,
         chunk_count=len(chunks),
     )
+
+
+# --- Setup wizard endpoints (Issue #101) ---------------------------------
+#
+# Distinct from the sync endpoints above: these never write ReferenceItem/Source
+# rows, and test_connection specifically never writes a PublishMapping row either
+# — it's a read-only probe the wizard uses to preview scopes/types before the
+# user commits to a mapping (see publish.py's upsert_mapping for the endpoint
+# that actually persists one).
+
+
+class ConnectorCapabilitiesResponse(BaseModel):
+    supports_native_hierarchy: bool
+    type_system: str
+    parent_link_strategy: str
+
+
+class ConnectorDefinitionResponse(BaseModel):
+    tool_key: str
+    display_name: str
+    auth_methods: list[str]
+    scope_picker_type: str
+    capabilities: ConnectorCapabilitiesResponse
+
+
+class ListConnectorsResponse(BaseModel):
+    connectors: list[ConnectorDefinitionResponse]
+
+
+@router.get("/connectors")
+async def list_connectors() -> ListConnectorsResponse:
+    return ListConnectorsResponse(
+        connectors=[
+            ConnectorDefinitionResponse(
+                tool_key=c.tool_key,
+                display_name=c.display_name,
+                auth_methods=list(c.auth_methods),
+                scope_picker_type=c.scope_picker_type,
+                capabilities=ConnectorCapabilitiesResponse(
+                    supports_native_hierarchy=c.capabilities.supports_native_hierarchy,
+                    type_system=c.capabilities.type_system,
+                    parent_link_strategy=c.capabilities.parent_link_strategy,
+                ),
+            )
+            for c in CONNECTOR_REGISTRY.values()
+        ]
+    )
+
+
+class TestConnectionBody(BaseModel):
+    # Optional — omitted on the first wizard step before a scope is chosen, the
+    # same pattern MappingBody uses in publish.py (a request body rather than a
+    # query param, since this is a POST and the codebase already has precedent
+    # for that shape).
+    remote_project: str | None = None
+
+
+class TestConnectionResponse(BaseModel):
+    scope_options: list[dict[str, str]]
+    item_types: list[dict[str, object]] | None
+    extras: dict[str, object]
+
+
+@router.post("/workspaces/{workspace_id}/projects/{project_id}/connectors/{tool_key}/test")
+async def test_connection(
+    workspace_id: str,
+    project_id: str,
+    tool_key: str,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    body: TestConnectionBody = TestConnectionBody(),
+) -> TestConnectionResponse:
+    connector = CONNECTOR_REGISTRY.get(tool_key)
+    if connector is None:
+        raise HTTPException(status_code=404, detail=f"Unknown connector '{tool_key}'.")
+
+    if await session.get(Project, project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    # TEMPORARY, replaced in Task 6 by real per-workspace connection resolution:
+    # for now, just call each tool's existing env-configured connection
+    # resolver directly, the same way the existing publish routers do today.
+    connection = _get_env_configured_connection(tool_key)
+
+    try:
+        result = await connector.discovery_fn(connection, body.remote_project)
+    except ConnectorError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — surfaced as a clean 502, not a raw crash
+        raise HTTPException(status_code=502, detail=f"Connection test failed: {exc}") from exc
+
+    return TestConnectionResponse(
+        scope_options=[{"id": o.id, "label": o.label} for o in result.scope_options],
+        item_types=(
+            [
+                {
+                    "id": it.id,
+                    "name": it.name,
+                    "supports_children": it.supports_children,
+                    "fields": [
+                        {"id": f.id, "name": f.name, "required": f.required, "has_default": f.has_default}
+                        for f in it.fields
+                    ],
+                }
+                for it in result.item_types
+            ]
+            if result.item_types is not None
+            else None
+        ),
+        extras=result.extras,
+    )
+
+
+def _get_env_configured_connection(tool_key: str) -> object:
+    """TEMPORARY (Task 4) — direct env-configured connection lookup per tool.
+    Task 6 replaces this with real per-workspace Connection-aware resolution
+    (checking for a stored OAuth Connection before falling back to this)."""
+    if tool_key == "jira":
+        from app.services.connectors.jira_auth import get_jira_connection
+
+        return get_jira_connection()
+    if tool_key == "ado":
+        from app.services.connectors.ado_auth import get_ado_connection
+
+        return get_ado_connection()
+    if tool_key == "github":
+        from app.services.connectors.github_auth import get_github_connection
+
+        return get_github_connection()
+    raise HTTPException(status_code=404, detail=f"Unknown connector '{tool_key}'.")
 
 
 @router.post("/connectors/slack/channels/{channel_id}/sync")

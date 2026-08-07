@@ -5,6 +5,7 @@ test_sources.py, for the same event-loop reasons documented there)."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
@@ -14,9 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import Project, RawRequirement, ReferenceItem, Source, Workspace
+from app.models import Project, PublishMapping, RawRequirement, ReferenceItem, Source, Workspace
 from app.routers.connectors import ConnectorFetchers, get_connector_fetchers
 from app.services.connectors.confluence import ConfluencePage
+from app.services.connectors.discovery_types import DiscoveryResult, ScopeOption
 from app.services.connectors.types import ReferenceItemData
 
 
@@ -240,4 +242,103 @@ def test_slack_channel_sync_creates_source_with_filtered_chunks() -> None:
     # Author resolved to a display name, not a raw Slack user ID.
     assert asyncio.run(fetch_chunk_text()).startswith("Priya N:")
 
+    asyncio.run(_cleanup(ids))
+
+
+async def _count_publish_mappings(project_id: str) -> int:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            result = await session.execute(
+                select(PublishMapping).where(PublishMapping.projectId == project_id)
+            )
+            return len(list(result.scalars()))
+    finally:
+        await engine.dispose()
+
+
+def test_list_connectors_returns_all_three_tools_with_capabilities() -> None:
+    client = TestClient(app)
+    res = client.get("/connectors")
+    _dispose_app_engine()
+    assert res.status_code == 200
+    body = res.json()
+    tool_keys = {c["tool_key"] for c in body["connectors"]}
+    assert tool_keys == {"jira", "ado", "github"}
+    github = next(c for c in body["connectors"] if c["tool_key"] == "github")
+    assert github["auth_methods"] == ["ENV_CONFIGURED", "OAUTH"]
+    assert github["capabilities"]["supports_native_hierarchy"] is False
+
+
+def test_test_connection_returns_discovery_data_without_saving_mapping() -> None:
+    ids = asyncio.run(_create_project())
+    client = TestClient(app)
+
+    async def fake_discover(connection: object, remote_project: str | None = None) -> DiscoveryResult:
+        return DiscoveryResult(
+            scope_options=[ScopeOption(id="PAY", label="Payments (PAY)")],
+            item_types=None,
+            extras={"note": "ok"},
+        )
+
+    import app.routers.connectors as connectors_module
+
+    original = connectors_module.CONNECTOR_REGISTRY["jira"].discovery_fn
+    connectors_module.CONNECTOR_REGISTRY["jira"] = dataclasses.replace(
+        connectors_module.CONNECTOR_REGISTRY["jira"], discovery_fn=fake_discover
+    )
+    try:
+        response = client.post(
+            f"/workspaces/{ids['workspace_id']}/projects/{ids['project_id']}/connectors/jira/test"
+        )
+    finally:
+        connectors_module.CONNECTOR_REGISTRY["jira"] = dataclasses.replace(
+            connectors_module.CONNECTOR_REGISTRY["jira"], discovery_fn=original
+        )
+        _dispose_app_engine()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["scope_options"] == [{"id": "PAY", "label": "Payments (PAY)"}]
+    assert payload["extras"] == {"note": "ok"}
+
+    assert asyncio.run(_count_publish_mappings(ids["project_id"])) == 0
+    asyncio.run(_cleanup(ids))
+
+
+def test_test_connection_unknown_tool_returns_404() -> None:
+    ids = asyncio.run(_create_project())
+    client = TestClient(app)
+    response = client.post(
+        f"/workspaces/{ids['workspace_id']}/projects/{ids['project_id']}/connectors/trello/test"
+    )
+    _dispose_app_engine()
+    assert response.status_code == 404
+    asyncio.run(_cleanup(ids))
+
+
+def test_test_connection_discovery_failure_returns_clean_502() -> None:
+    ids = asyncio.run(_create_project())
+    client = TestClient(app)
+
+    async def failing_discover(connection: object, remote_project: str | None = None) -> DiscoveryResult:
+        raise RuntimeError("boom")
+
+    import app.routers.connectors as connectors_module
+
+    original = connectors_module.CONNECTOR_REGISTRY["jira"].discovery_fn
+    connectors_module.CONNECTOR_REGISTRY["jira"] = dataclasses.replace(
+        connectors_module.CONNECTOR_REGISTRY["jira"], discovery_fn=failing_discover
+    )
+    try:
+        response = client.post(
+            f"/workspaces/{ids['workspace_id']}/projects/{ids['project_id']}/connectors/jira/test"
+        )
+    finally:
+        connectors_module.CONNECTOR_REGISTRY["jira"] = dataclasses.replace(
+            connectors_module.CONNECTOR_REGISTRY["jira"], discovery_fn=original
+        )
+        _dispose_app_engine()
+
+    assert response.status_code == 502
     asyncio.run(_cleanup(ids))
