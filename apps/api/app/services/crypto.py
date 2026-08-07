@@ -76,6 +76,11 @@ def encrypt_credentials(plaintext: str) -> bytes:
 
 
 def decrypt_credentials(encrypted: bytes) -> str:
+    if len(encrypted) < _NONCE_LENGTH:
+        # Too short to even contain a nonce — corrupted/truncated input.
+        # AESGCM.decrypt would raise a bare ValueError here, not InvalidTag,
+        # which callers catching only CredentialDecryptionError wouldn't see.
+        raise CredentialDecryptionError("Ciphertext is too short to be valid.")
     key = _get_data_encryption_key()
     nonce, ciphertext = encrypted[:_NONCE_LENGTH], encrypted[_NONCE_LENGTH:]
     try:

@@ -38,6 +38,15 @@ def test_decrypt_rejects_tampered_ciphertext(monkeypatch):
         decrypt_credentials(bytes(encrypted))
 
 
+def test_decrypt_rejects_input_too_short_to_contain_a_nonce(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.crypto._get_data_encryption_key",
+        lambda: b"0" * 32,
+    )
+    with pytest.raises(CredentialDecryptionError):
+        decrypt_credentials(b"short")
+
+
 def test_cached_key_is_reused_across_calls(monkeypatch):
     # The DEK should be fetched once and cached module-level, not re-fetched
     # on every encrypt/decrypt call (that would be a real Key Vault round-trip
