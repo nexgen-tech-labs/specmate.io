@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""
     # Duplicate-detection default similarity threshold (Issue 3.5); Workspace.duplicateThreshold overrides.
     duplicate_similarity_threshold: float = 0.55
+    # Envelope encryption for per-workspace connector credentials (Issue #101).
+    # AZURE_KEY_VAULT_URL is the production path — app/services/crypto.py fetches the
+    # data-encryption key from this vault via DefaultAzureCredential. CONNECTOR_DEK_B64
+    # is a local-dev-only override (a base64-encoded 32-byte key set directly via env)
+    # that bypasses Key Vault entirely; never used in production.
+    azure_key_vault_url: str = ""
+    connector_dek_b64: str = ""
 
 
 settings = Settings()
