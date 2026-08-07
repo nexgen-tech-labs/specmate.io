@@ -7,10 +7,17 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import cast
 
 import httpx
 
 from app.services.connectors.ado_auth import AdoConnection
+from app.services.connectors.discovery_types import (
+    DiscoveryResult,
+    FieldRequirement,
+    ItemType,
+    ScopeOption,
+)
 from app.services.connectors.format_adapter import FormatMode, FormattedContent, format_item
 from app.services.connectors.transport import DirectCloudTransport
 from app.services.connectors.types import ConnectorError, ConnectorTransport
@@ -108,6 +115,42 @@ async def discover_project_meta(
             _paths(iterations_response.json()) if iterations_response.status_code == 200 else []
         ),
     }
+
+
+async def discover_as_result(
+    connection: AdoConnection,
+    project_name: str | None = None,
+    transport: ConnectorTransport = _default_transport,
+) -> DiscoveryResult:
+    """Adapter (Issue #101) onto the tool-agnostic DiscoveryResult shape — calls
+    the existing discover_projects/discover_project_meta unchanged and reshapes
+    their output for the wizard registry. ADO's discovery only returns the
+    genuinely required fields (alwaysRequired), so every FieldRequirement here
+    is required=True, has_default=False — there's no optional-field data to
+    preserve from the source shape."""
+    projects = await discover_projects(connection, transport)
+    scope_options = [ScopeOption(id=p["id"], label=p["name"]) for p in projects]
+    item_types: list[ItemType] | None = None
+    extras: dict[str, object] = {}
+    if project_name:
+        meta = await discover_project_meta(connection, project_name, transport)
+        work_item_types = cast("list[dict[str, object]]", meta["work_item_types"])
+        item_types = [
+            ItemType(
+                id=cast(str, wit["name"]),
+                name=cast(str, wit["name"]),
+                supports_children=True,
+                fields=[
+                    FieldRequirement(
+                        id=cast(str, f["id"]), name=cast(str, f["name"]), required=True, has_default=False
+                    )
+                    for f in cast("list[dict[str, object]]", wit.get("required_fields", []))
+                ],
+            )
+            for wit in work_item_types
+        ]
+        extras = {"area_paths": meta["area_paths"], "iteration_paths": meta["iteration_paths"]}
+    return DiscoveryResult(scope_options=scope_options, item_types=item_types, extras=extras)
 
 
 # ---------- Publishing (Issues 6.4/6.6/6.7) ----------

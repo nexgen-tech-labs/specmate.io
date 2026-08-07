@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import httpx
 
 from app.models import DraftItem
+from app.services.connectors.discovery_types import DiscoveryResult, ScopeOption
 from app.services.connectors.format_adapter import FormatMode, FormattedContent, format_item
 from app.services.connectors.github_auth import GitHubConnection
 from app.services.connectors.transport import DirectCloudTransport
@@ -109,6 +110,30 @@ async def discover_repo_meta(
         ],
         "file_paths": file_paths,
     }
+
+
+async def discover_as_result(
+    connection: GitHubConnection,
+    repo: str | None = None,
+    transport: ConnectorTransport = _default_transport,
+) -> DiscoveryResult:
+    """Adapter (Issue #101) onto the tool-agnostic DiscoveryResult shape — calls
+    the existing discover_repos/discover_repo_meta unchanged and reshapes their
+    output for the wizard registry. GitHub Issues has no native type system, so
+    item_types is always None; per-repo metadata (labels/milestones/file_paths)
+    is only fetched once a repo has been selected, matching the pattern of
+    fetching item-level detail only after a scope is chosen."""
+    repos = await discover_repos(connection, transport)
+    scope_options = [ScopeOption(id=r["full_name"], label=r["full_name"]) for r in repos]
+    extras: dict[str, object] = {}
+    if repo:
+        meta = await discover_repo_meta(connection, repo, transport)
+        extras = {
+            "labels": meta["labels"],
+            "milestones": meta["milestones"],
+            "file_paths": meta["file_paths"],
+        }
+    return DiscoveryResult(scope_options=scope_options, item_types=None, extras=extras)
 
 
 def suggest_file_references(item: DraftItem, file_paths: list[str]) -> list[str]:

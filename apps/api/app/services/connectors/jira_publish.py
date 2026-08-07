@@ -6,9 +6,16 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import cast
 
 import httpx
 
+from app.services.connectors.discovery_types import (
+    DiscoveryResult,
+    FieldRequirement,
+    ItemType,
+    ScopeOption,
+)
 from app.services.connectors.jira_auth import JiraConnection
 from app.services.connectors.transport import DirectCloudTransport
 from app.services.connectors.types import ConnectorError, ConnectorTransport
@@ -85,6 +92,41 @@ async def discover_project_meta(
     except httpx.HTTPError as exc:
         raise ConnectorError(f"Jira metadata discovery failed for {project_key}: {exc}") from exc
     return {"project_key": project_key, "issue_types": issue_types}
+
+
+async def discover_as_result(
+    connection: JiraConnection,
+    project_key: str | None = None,
+    transport: ConnectorTransport = _default_transport,
+) -> DiscoveryResult:
+    """Adapter (Issue #101) onto the tool-agnostic DiscoveryResult shape — calls
+    the existing discover_projects/discover_project_meta unchanged and reshapes
+    their output for the wizard registry."""
+    projects = await discover_projects(connection, transport)
+    scope_options = [ScopeOption(id=p["key"], label=f"{p['name']} ({p['key']})") for p in projects]
+    item_types: list[ItemType] | None = None
+    extras: dict[str, object] = {}
+    if project_key:
+        meta = await discover_project_meta(connection, project_key, transport)
+        issue_types = cast("list[dict[str, object]]", meta["issue_types"])
+        item_types = [
+            ItemType(
+                id=cast(str, it["id"]),
+                name=cast(str, it["name"]),
+                supports_children=not it.get("subtask", False),
+                fields=[
+                    FieldRequirement(
+                        id=cast(str, f["id"]),
+                        name=cast(str, f["name"]),
+                        required=cast(bool, f["required"]),
+                        has_default=cast(bool, f["has_default"]),
+                    )
+                    for f in cast("list[dict[str, object]]", it.get("fields", []))
+                ],
+            )
+            for it in issue_types
+        ]
+    return DiscoveryResult(scope_options=scope_options, item_types=item_types, extras=extras)
 
 
 # ---------- Publishing (Issues 5.4/5.6/5.7) ----------
