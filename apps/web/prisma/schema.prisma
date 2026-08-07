@@ -196,6 +196,9 @@ model Workspace {
   atlassianConnectInstalls  AtlassianConnectInstall[]
   apiRateLimitCounters      ApiRateLimitCounter[]
   usageReconciliationFlags  UsageReconciliationFlag[]
+  connections               Connection[]
+  wizardSessions            WizardSession[]
+  connectionRequests        ConnectionRequest[]
 }
 
 // One row per Jira Cloud site that has installed the SpecMate Atlassian
@@ -298,6 +301,7 @@ model User {
   auditEvents      AuditEvent[]
   sentInvites      WorkspaceInvite[]
   sentOrgInvites   OrganizationInvite[]
+  sentConnectionRequests ConnectionRequest[]
 }
 
 // Login-identity linking only (Issue 12.8) — no access/refresh tokens stored,
@@ -395,6 +399,7 @@ model Project {
   publishMappings PublishMapping[]
   snapshots       Snapshot[]
   teamScopes      TeamProject[]
+  wizardSessions  WizardSession[]
 }
 
 model Source {
@@ -753,4 +758,61 @@ model TraceLink {
   rawRequirement RawRequirement  @relation(fields: [rawRequirementId], references: [id])
   draftItem      DraftItem       @relation(fields: [draftItemId], references: [id])
   publishedItem  PublishedItem?  @relation(fields: [publishedItemId], references: [id])
+}
+
+// Per-workspace connector credential storage (Issue #101) — the first real
+// per-workspace connection store this repo has built; every prior connector
+// (Jira/ADO/GitHub) has been single-tenant env-var auth until now.
+// encryptedCredentials is null for ENV_CONFIGURED (nothing to store — the
+// workspace just uses the ops-configured env credentials); populated only
+// for OAUTH-authenticated connections (GitHub, in this issue).
+model Connection {
+  id                   String    @id @default(cuid())
+  workspaceId          String
+  toolKey              String
+  authMethod           String // "ENV_CONFIGURED" | "OAUTH"
+  encryptedCredentials Bytes?
+  scope                Json?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  lastHealthCheckAt    DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+
+  @@unique([workspaceId, toolKey])
+}
+
+// Resumable wizard progress (Issue #101 AC: survive a browser refresh mid-OAuth-
+// redirect). No background sweep — expired rows are simply excluded from the
+// "resume" lookup, consistent with this repo's established no-new-scheduler
+// precedent.
+model WizardSession {
+  id             String   @id @default(cuid())
+  workspaceId    String
+  projectId      String
+  toolKey        String
+  currentStep    String
+  collectedState Json     @default("{}")
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  project   Project   @relation(fields: [projectId], references: [id])
+}
+
+// Permission-mismatch fallback (Issue #101): a shareable link + tracked status
+// for when the SpecMate admin completing setup can't grant SpecMate access
+// themselves (e.g. not a Jira Admin, or GitHub OAuth consent was denied).
+model ConnectionRequest {
+  id                String   @id @default(cuid())
+  workspaceId       String
+  toolKey           String
+  requestedByUserId String
+  token             String   @unique
+  status            String   @default("SENT") // SENT | COMPLETED | EXPIRED
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id])
+  requestedBy User      @relation(fields: [requestedByUserId], references: [id])
 }

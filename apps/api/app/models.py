@@ -13,7 +13,7 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -574,6 +574,62 @@ class ReferenceItem(Base):
     syncedAt: Mapped[datetime] = mapped_column(DateTime)
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
+
+
+class Connection(Base):
+    """Per-workspace connector credential storage (Issue #101) — the first real
+    per-workspace connection store this repo has built; every prior connector
+    (Jira/ADO/GitHub) has been single-tenant env-var auth until now.
+    encryptedCredentials is null for ENV_CONFIGURED (nothing to store — the
+    workspace just uses the ops-configured env credentials); populated only
+    for OAUTH-authenticated connections (GitHub, in this issue)."""
+
+    __tablename__ = "Connection"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    toolKey: Mapped[str] = mapped_column(String)
+    authMethod: Mapped[str] = mapped_column(String)
+    encryptedCredentials: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    scope: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
+    lastHealthCheckAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class WizardSession(Base):
+    """Resumable wizard progress (Issue #101 AC: survive a browser refresh mid-OAuth-
+    redirect). No background sweep — expired rows are simply excluded from the
+    "resume" lookup, consistent with this repo's established no-new-scheduler
+    precedent."""
+
+    __tablename__ = "WizardSession"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
+    toolKey: Mapped[str] = mapped_column(String)
+    currentStep: Mapped[str] = mapped_column(String)
+    collectedState: Mapped[dict[str, object]] = mapped_column(JSONB)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    expiresAt: Mapped[datetime] = mapped_column(DateTime)
+
+
+class ConnectionRequest(Base):
+    """Permission-mismatch fallback (Issue #101): a shareable link + tracked status
+    for when the SpecMate admin completing setup can't grant SpecMate access
+    themselves (e.g. not a Jira Admin, or GitHub OAuth consent was denied)."""
+
+    __tablename__ = "ConnectionRequest"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    toolKey: Mapped[str] = mapped_column(String)
+    requestedByUserId: Mapped[str] = mapped_column(ForeignKey("User.id"))
+    token: Mapped[str] = mapped_column(String, unique=True)
+    status: Mapped[str] = mapped_column(String, default="SENT")
+    expiresAt: Mapped[datetime] = mapped_column(DateTime)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
 
 
 class AiCallLog(Base):
