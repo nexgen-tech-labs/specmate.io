@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -78,7 +79,14 @@ async def github_oauth_callback(
         existing.authMethod = "OAUTH"
         existing.encryptedCredentials = encrypted
         existing.updatedAt = now
+        wizard_session.currentStep = "select_scope"
+        await session.commit()
     else:
+        # Two concurrent callbacks for the same `state` (e.g. a double-submitted
+        # OAuth redirect) can both reach this branch after both seeing no
+        # existing row — the @@unique([workspaceId, toolKey]) constraint means
+        # only one INSERT wins. Fall back to updating the row the other request
+        # just created rather than surfacing an unhandled IntegrityError.
         session.add(
             Connection(
                 workspaceId=wizard_session.workspaceId,
@@ -89,7 +97,26 @@ async def github_oauth_callback(
                 updatedAt=now,
             )
         )
-    wizard_session.currentStep = "select_scope"
-    await session.commit()
+        wizard_session.currentStep = "select_scope"
+        workspace_id = wizard_session.workspaceId
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            winner = (
+                await session.execute(
+                    select(Connection).where(
+                        Connection.workspaceId == workspace_id,
+                        Connection.toolKey == "github",
+                    )
+                )
+            ).scalar_one()
+            winner.authMethod = "OAUTH"
+            winner.encryptedCredentials = encrypted
+            winner.updatedAt = now
+            wizard_session = await session.get(WizardSession, state)
+            assert wizard_session is not None
+            wizard_session.currentStep = "select_scope"
+            await session.commit()
 
     return {"wizardSessionId": wizard_session.id, "status": "connected"}

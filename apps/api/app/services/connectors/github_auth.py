@@ -65,17 +65,23 @@ async def exchange_oauth_code_for_token(code: str) -> str:
     """
     if not settings.github_oauth_app_client_id or not settings.github_oauth_app_client_secret:
         raise ConnectorError("GitHub OAuth App is not configured.")
-    async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.post(
-            "https://github.com/login/oauth/access_token",
-            headers={"Accept": "application/json"},
-            data={
-                "client_id": settings.github_oauth_app_client_id,
-                "client_secret": settings.github_oauth_app_client_secret,
-                "code": code,
-            },
-        )
-        response.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                data={
+                    "client_id": settings.github_oauth_app_client_id,
+                    "client_secret": settings.github_oauth_app_client_secret,
+                    "code": code,
+                },
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        # Covers both a non-2xx response (HTTPStatusError) and network-level
+        # failures (ConnectError/TimeoutException/...) — callers only need to
+        # catch ConnectorError, not every possible httpx exception type.
+        raise ConnectorError(f"GitHub OAuth token exchange request failed: {exc}") from exc
     payload = response.json()
     token = payload.get("access_token")
     if not token:

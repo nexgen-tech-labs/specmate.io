@@ -8,6 +8,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -228,6 +229,41 @@ def test_callback_with_expired_session_returns_404() -> None:
 
         _dispose_app_engine()
         assert _get_connection(ids["workspace_id"]) is None
+    finally:
+        _cleanup(ids)
+
+
+def test_callback_called_concurrently_results_in_exactly_one_connection() -> None:
+    ids = _create_wizard_session()
+    try:
+        with (
+            patch.object(settings, "github_oauth_app_client_id", "test-client-id"),
+            patch.object(settings, "github_oauth_app_client_secret", "test-secret"),
+            patch.object(settings, "connector_dek_b64", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
+            patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_FakeTokenResponse())),
+        ):
+
+            async def _fire_both() -> tuple[int, int]:
+                async def _call(code: str) -> int:
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app), base_url="http://test"
+                    ) as ac:
+                        res = await ac.get(
+                            "/connectors/github/oauth/callback",
+                            params={"code": code, "state": ids["wizard_session_id"]},
+                        )
+                        return res.status_code
+
+                return await asyncio.gather(_call("fake-code-1"), _call("fake-code-2"))
+
+            _dispose_app_engine()
+            status_codes = asyncio.run(_fire_both())
+
+        assert status_codes[0] == 200
+        assert status_codes[1] == 200
+
+        _dispose_app_engine()
+        assert _count_connections(ids["workspace_id"]) == 1
     finally:
         _cleanup(ids)
 
