@@ -8,6 +8,7 @@ from app.routers import (
     drift,
     flag_removed,
     generation,
+    github_oauth,
     health,
     publish,
     publish_ado,
@@ -24,6 +25,7 @@ app.include_router(health.router)
 app.include_router(ai_demo.router)
 app.include_router(sources.router)
 app.include_router(connectors.router)
+app.include_router(github_oauth.router)
 app.include_router(generation.router)
 app.include_router(publish.router)
 app.include_router(publish_ado.router)
