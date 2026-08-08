@@ -4,6 +4,7 @@ from app.core.rate_limit import install_rate_limit_middleware
 from app.routers import (
     ai_demo,
     billing,
+    connection_requests,
     connectors,
     drift,
     flag_removed,
@@ -28,6 +29,7 @@ app.include_router(sources.router)
 app.include_router(connectors.router)
 app.include_router(github_oauth.router)
 app.include_router(wizard_sessions.router)
+app.include_router(connection_requests.router)
 app.include_router(generation.router)
 app.include_router(publish.router)
 app.include_router(publish_ado.router)
