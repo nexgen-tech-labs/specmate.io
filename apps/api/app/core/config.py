@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # that bypasses Key Vault entirely; never used in production.
     azure_key_vault_url: str = ""
     connector_dek_b64: str = ""
+    # GitHub OAuth App (Issue #101) — for per-workspace delegated connector auth,
+    # distinct from GITHUB_TOKEN (the existing single-tenant PAT fallback) AND
+    # distinct from Issue #95's GITHUB_OAUTH_CLIENT_ID (that's for SpecMate USER
+    # LOGIN via GitHub — a completely different OAuth App registration/purpose,
+    # and lives in apps/web, not here).
+    github_oauth_app_client_id: str = ""
+    github_oauth_app_client_secret: str = ""
 
 
 settings = Settings()

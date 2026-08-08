@@ -56,6 +56,56 @@ def get_github_connection() -> TokenConnection:
     return TokenConnection(token=settings.github_token)
 
 
+async def exchange_oauth_code_for_token(code: str) -> str:
+    """GitHub OAuth authorization-code exchange (Issue #101's wizard OAuth step).
+
+    Trades a short-lived `code` (from the /login/oauth/authorize redirect) for a
+    per-workspace access token. The token is handed back to the caller to encrypt
+    and persist (app/services/crypto.py) — this function never touches storage.
+    """
+    if not settings.github_oauth_app_client_id or not settings.github_oauth_app_client_secret:
+        raise ConnectorError("GitHub OAuth App is not configured.")
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            "https://github.com/login/oauth/access_token",
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": settings.github_oauth_app_client_id,
+                "client_secret": settings.github_oauth_app_client_secret,
+                "code": code,
+            },
+        )
+        response.raise_for_status()
+    payload = response.json()
+    token = payload.get("access_token")
+    if not token:
+        raise ConnectorError(
+            f"GitHub OAuth token exchange failed: {payload.get('error', 'unknown error')}"
+        )
+    return str(token)
+
+
+@dataclass(frozen=True)
+class OAuthTokenConnection:
+    """Satisfies the GitHubConnection Protocol using a per-workspace OAuth
+    token (decrypted from Connection.encryptedCredentials at resolution time,
+    never persisted in plaintext) instead of the single-tenant TokenConnection
+    above."""
+
+    token: str
+    base_url_: str = _DEFAULT_BASE_URL
+
+    def base_url(self) -> str:
+        return self.base_url_
+
+    def headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+
 async def check_connection_health(connection: GitHubConnection) -> dict[str, object]:
     """Issue 7.1's health check."""
     try:
