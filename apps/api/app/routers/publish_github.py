@@ -32,7 +32,7 @@ from app.services.connectors.format_adapter import FormatMode
 from app.services.connectors.github_auth import (
     GitHubConnection,
     check_connection_health,
-    get_github_connection,
+    resolve_github_connection,
 )
 from app.services.connectors.github_publish import (
     GitHubPublishOutcome,
@@ -62,9 +62,13 @@ _DEFAULT_PUBLISHABLE_TYPES = {
 }
 
 
+async def _resolve_connection(session: AsyncSession, workspace_id: str) -> GitHubConnection:
+    return await resolve_github_connection(session, workspace_id)
+
+
 @dataclass
 class GitHubPublishGateway:
-    connection: Callable[[], GitHubConnection] = get_github_connection
+    connection: Callable[[AsyncSession, str], Awaitable[GitHubConnection]] = _resolve_connection
     repos: Callable[[GitHubConnection], Awaitable[list[dict[str, str]]]] = discover_repos
     meta: Callable[[GitHubConnection, str], Awaitable[dict[str, object]]] = discover_repo_meta
     create: Callable[..., Awaitable[GitHubPublishOutcome]] = create_issue
@@ -87,10 +91,12 @@ def _now() -> datetime:
 
 @router.get("/connectors/github/publish-health")
 async def github_health(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     gateway: Annotated[GitHubPublishGateway, Depends(get_github_gateway)],
+    workspace_id: str | None = None,
 ) -> dict[str, object]:
     try:
-        connection = gateway.connection()
+        connection = await gateway.connection(session, workspace_id or "")
     except ConnectorError as exc:
         return {"ok": False, "reason": str(exc)}
     return await gateway.health(connection)
@@ -98,10 +104,13 @@ async def github_health(
 
 @router.get("/connectors/github/repos")
 async def github_repos(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     gateway: Annotated[GitHubPublishGateway, Depends(get_github_gateway)],
+    workspace_id: str | None = None,
 ) -> list[dict[str, str]]:
     try:
-        return await gateway.repos(gateway.connection())
+        connection = await gateway.connection(session, workspace_id or "")
+        return await gateway.repos(connection)
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -121,10 +130,12 @@ async def upsert_github_mapping(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     gateway: Annotated[GitHubPublishGateway, Depends(get_github_gateway)],
 ) -> dict[str, object]:
-    if await session.get(Project, project_id) is None:
+    project = await session.get(Project, project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
     try:
-        metadata = await gateway.meta(gateway.connection(), body.remote_project)
+        connection = await gateway.connection(session, project.workspaceId)
+        metadata = await gateway.meta(connection, body.remote_project)
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -320,7 +331,7 @@ async def publish_to_github(
     connection = None
     if candidates:
         try:
-            connection = gateway.connection()
+            connection = await gateway.connection(session, workspace.id)
         except ConnectorError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

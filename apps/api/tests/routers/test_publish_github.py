@@ -94,8 +94,11 @@ class _FakeGitHub:
         async def fake_health(_conn: object) -> dict[str, object]:
             return {"ok": True, "account": "acme-bot"}
 
+        async def fake_connection(_session: object, _workspace_id: str) -> TokenConnection:
+            return TokenConnection("t")
+
         return GitHubPublishGateway(
-            connection=lambda: TokenConnection("t"),
+            connection=fake_connection,
             repos=fake_repos,
             meta=fake_meta,
             create=fake_create,

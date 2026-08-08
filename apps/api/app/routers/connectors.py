@@ -298,10 +298,7 @@ async def test_connection(
     if await session.get(Project, project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found.")
 
-    # TEMPORARY, replaced in Task 6 by real per-workspace connection resolution:
-    # for now, just call each tool's existing env-configured connection
-    # resolver directly, the same way the existing publish routers do today.
-    connection = _get_env_configured_connection(tool_key)
+    connection = await _resolve_connection(session, tool_key, workspace_id)
 
     try:
         result = await connector.discovery_fn(connection, body.remote_project)
@@ -332,10 +329,12 @@ async def test_connection(
     )
 
 
-def _get_env_configured_connection(tool_key: str) -> object:
-    """TEMPORARY (Task 4) — direct env-configured connection lookup per tool.
-    Task 6 replaces this with real per-workspace Connection-aware resolution
-    (checking for a stored OAuth Connection before falling back to this)."""
+async def _resolve_connection(session: AsyncSession, tool_key: str, workspace_id: str) -> object:
+    """Per-workspace connection resolution (Issue #101). GitHub prefers a stored
+    OAuth Connection for this workspace, falling back to the env-configured
+    connection. Jira/ADO have no per-workspace Connection support in this issue
+    (see design doc) — they stay on the existing single-tenant env-configured
+    resolvers unchanged."""
     if tool_key == "jira":
         from app.services.connectors.jira_auth import get_jira_connection
 
@@ -345,9 +344,9 @@ def _get_env_configured_connection(tool_key: str) -> object:
 
         return get_ado_connection()
     if tool_key == "github":
-        from app.services.connectors.github_auth import get_github_connection
+        from app.services.connectors.github_auth import resolve_github_connection
 
-        return get_github_connection()
+        return await resolve_github_connection(session, workspace_id)
     raise HTTPException(status_code=404, detail=f"Unknown connector '{tool_key}'.")
 
 

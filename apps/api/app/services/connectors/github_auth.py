@@ -19,12 +19,15 @@ github.com first).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import httpx
 
 from app.core.config import settings
 from app.services.connectors.types import ConnectorError
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 _DEFAULT_BASE_URL = "https://api.github.com"
 
@@ -110,6 +113,30 @@ class OAuthTokenConnection:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
+
+
+async def resolve_github_connection(session: "AsyncSession", workspace_id: str) -> GitHubConnection:
+    """Per-workspace connection resolution (Issue #101): prefers a stored OAuth
+    Connection for this workspace, falls back to the existing single-tenant
+    env-configured connection unchanged — so GitHub publishing keeps working
+    exactly as before for every workspace that hasn't gone through the OAuth
+    wizard."""
+    from sqlalchemy import select
+
+    from app.models import Connection
+    from app.services.crypto import decrypt_credentials
+
+    row = (
+        await session.execute(
+            select(Connection).where(
+                Connection.workspaceId == workspace_id, Connection.toolKey == "github"
+            )
+        )
+    ).scalar_one_or_none()
+    if row and row.authMethod == "OAUTH" and row.encryptedCredentials:
+        token = decrypt_credentials(row.encryptedCredentials)
+        return OAuthTokenConnection(token=token)
+    return get_github_connection()
 
 
 async def check_connection_health(connection: GitHubConnection) -> dict[str, object]:
