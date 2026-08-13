@@ -49,12 +49,12 @@ async def github_oauth_callback(
     code: str,
     state: str,
     session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> dict[str, str]:
-    # NOTE (Task 9 integration point): this currently returns JSON, not a
-    # redirect back into the apps/web wizard UI. Once the frontend wizard
-    # shell exists, confirm whether this should instead redirect to a
-    # apps/web URL carrying the wizard session id, and adjust then — not
-    # guessed at here since the frontend routing doesn't exist yet.
+) -> RedirectResponse:
+    # Task 9: redirects back into the apps/web wizard UI (rather than returning
+    # raw JSON) once the token exchange completes, since the wizard shell now
+    # exists and needs a real browser navigation to resume. workspaceId/projectId
+    # aren't in the callback's own query params (only the wizard_session_id is,
+    # via `state`) — they're read off the WizardSession row instead.
     wizard_session = await session.get(WizardSession, state)
     now = _now()
     if not wizard_session or wizard_session.expiresAt < now:
@@ -119,4 +119,8 @@ async def github_oauth_callback(
             wizard_session.currentStep = "select_scope"
             await session.commit()
 
-    return {"wizardSessionId": wizard_session.id, "status": "connected"}
+    redirect_url = (
+        f"{settings.web_base_url}/workspaces/{wizard_session.workspaceId}"
+        f"/projects/{wizard_session.projectId}/connect/github?oauth=success"
+    )
+    return RedirectResponse(redirect_url)

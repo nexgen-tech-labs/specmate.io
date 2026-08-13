@@ -170,7 +170,7 @@ def test_callback_with_valid_session_creates_encrypted_connection_and_advances_s
     ids = _create_wizard_session()
     try:
         _dispose_app_engine()
-        client = TestClient(app)
+        client = TestClient(app, follow_redirects=False)
         with (
             patch.object(settings, "github_oauth_app_client_id", "test-client-id"),
             patch.object(settings, "github_oauth_app_client_secret", "test-secret"),
@@ -181,8 +181,13 @@ def test_callback_with_valid_session_creates_encrypted_connection_and_advances_s
                 "/connectors/github/oauth/callback",
                 params={"code": "fake-code", "state": ids["wizard_session_id"]},
             )
-        assert res.status_code == 200
-        assert res.json()["status"] == "connected"
+        # Task 9: redirects back into the apps/web wizard UI rather than
+        # returning JSON, so the user lands on a real page after OAuth consent.
+        assert res.status_code in (302, 307)
+        location = res.headers["location"]
+        assert location.startswith(settings.web_base_url)
+        assert f"/workspaces/{ids['workspace_id']}/projects/{ids['project_id']}/connect/github" in location
+        assert "oauth=success" in location
 
         _dispose_app_engine()
         conn = _get_connection(ids["workspace_id"])
@@ -259,8 +264,8 @@ def test_callback_called_concurrently_results_in_exactly_one_connection() -> Non
             _dispose_app_engine()
             status_codes = asyncio.run(_fire_both())
 
-        assert status_codes[0] == 200
-        assert status_codes[1] == 200
+        assert status_codes[0] in (302, 307)
+        assert status_codes[1] in (302, 307)
 
         _dispose_app_engine()
         assert _count_connections(ids["workspace_id"]) == 1
@@ -278,18 +283,18 @@ def test_callback_called_twice_updates_existing_connection_not_duplicate() -> No
             patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_FakeTokenResponse())),
         ):
             _dispose_app_engine()
-            res1 = TestClient(app).get(
+            res1 = TestClient(app, follow_redirects=False).get(
                 "/connectors/github/oauth/callback",
                 params={"code": "fake-code-1", "state": ids["wizard_session_id"]},
             )
-            assert res1.status_code == 200
+            assert res1.status_code in (302, 307)
 
             _dispose_app_engine()
-            res2 = TestClient(app).get(
+            res2 = TestClient(app, follow_redirects=False).get(
                 "/connectors/github/oauth/callback",
                 params={"code": "fake-code-2", "state": ids["wizard_session_id"]},
             )
-            assert res2.status_code == 200
+            assert res2.status_code in (302, 307)
 
         _dispose_app_engine()
         assert _count_connections(ids["workspace_id"]) == 1

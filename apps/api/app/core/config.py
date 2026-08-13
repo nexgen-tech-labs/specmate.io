@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # and lives in apps/web, not here).
     github_oauth_app_client_id: str = ""
     github_oauth_app_client_secret: str = ""
+    # Base URL of the apps/web frontend (Issue #101) — used only to build the
+    # redirect target after the GitHub OAuth callback completes, so the user
+    # lands back in the wizard UI instead of seeing raw JSON. Not used for
+    # anything auth-sensitive; the wizard session id embedded in the redirect
+    # is validated server-side same as before.
+    web_base_url: str = "http://localhost:3000"
 
 
 settings = Settings()

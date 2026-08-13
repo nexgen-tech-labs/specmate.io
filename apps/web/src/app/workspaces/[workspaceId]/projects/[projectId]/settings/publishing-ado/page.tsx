@@ -1,4 +1,5 @@
 import { notFound } from 'next/navigation';
+import Link from 'next/link';
 import { requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { AdoPublishingSettings } from '@/components/publish/ado-publishing-settings';
@@ -27,6 +28,12 @@ export default async function AdoPublishingSettingsPage({
           Map {project.name}&apos;s items to your ADO project so approved items publish as real work
           items.
         </p>
+        <Link
+          href={`/workspaces/${workspaceId}/projects/${projectId}/connect/ado`}
+          className="mt-4 inline-block rounded-md border border-line px-4 py-2 text-sm font-semibold text-ink"
+        >
+          {mapping ? 'Reconnect' : 'Set up connection'} →
+        </Link>
         <AdoPublishingSettings
           workspaceId={workspaceId}
           projectId={projectId}

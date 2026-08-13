@@ -1,4 +1,5 @@
 import { notFound } from 'next/navigation';
+import Link from 'next/link';
 import { requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
 import { PublishingSettings } from '@/components/publish/publishing-settings';
@@ -28,6 +29,12 @@ export default async function PublishingSettingsPage({
           Map {project.name}&apos;s items to your Jira project so approved items publish as real
           issues.
         </p>
+        <Link
+          href={`/workspaces/${workspaceId}/projects/${projectId}/connect/jira`}
+          className="mt-4 inline-block rounded-md border border-line px-4 py-2 text-sm font-semibold text-ink"
+        >
+          {mapping ? 'Reconnect' : 'Set up connection'} →
+        </Link>
         <PublishingSettings
           workspaceId={workspaceId}
           projectId={projectId}
