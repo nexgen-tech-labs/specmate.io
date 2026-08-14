@@ -19,6 +19,7 @@ import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DraftItem, Project, PublishedItem, UsagePeriod, Workspace
@@ -81,7 +82,30 @@ async def meter_workspace_for_period(
         createdAt=now,
         updatedAt=now,
     )
-    session.add(row)
+    # Issue #109: two concurrent calls for the same (workspaceId, periodStart)
+    # can both pass the SELECT above before either flushes — the DB-level
+    # unique index (declared here as a matching SQLAlchemy UniqueConstraint,
+    # see the model) means only one INSERT wins. A SAVEPOINT (begin_nested)
+    # scopes the rollback to just this insert attempt, not the whole session
+    # — meter_all_workspaces_for_current_period stages multiple workspaces'
+    # rows in one session before any commit, so a full session.rollback()
+    # here would discard every other workspace's already-staged row too.
+    try:
+        async with session.begin_nested():
+            session.add(row)
+            await session.flush()
+    except IntegrityError:
+        winner = (
+            await session.execute(
+                select(UsagePeriod).where(
+                    UsagePeriod.workspaceId == workspace_id,
+                    UsagePeriod.periodStart == period_start,
+                )
+            )
+        ).scalar_one()
+        winner.publishedItemCount = count
+        winner.updatedAt = now
+        return winner
     return row
 
 

@@ -146,6 +146,49 @@ def test_metering_is_idempotent_per_period_not_duplicated() -> None:
     asyncio.run(_cleanup(ids))
 
 
+def test_concurrent_metering_for_the_same_period_results_in_exactly_one_row() -> None:
+    """Issue #109: two concurrent calls to meter_workspace_for_period for the
+    same (workspaceId, periodStart) both pass the SELECT before either flushes
+    — the DB-level unique index means only one INSERT wins. Fire two genuinely
+    concurrent calls (separate sessions, same period) via asyncio.gather and
+    confirm exactly one UsagePeriod row results with no unhandled exception."""
+    ids = asyncio.run(_fixture())
+
+    async def _meter_in_own_session() -> None:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                await meter_workspace_for_period(
+                    session, str(ids["workspace_id"]), ids["period_start"], ids["period_end"]  # type: ignore[arg-type]
+                )
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    async def run_concurrently() -> int:
+        await asyncio.gather(_meter_in_own_session(), _meter_in_own_session())
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                rows = (
+                    (
+                        await session.execute(
+                            select(UsagePeriod).where(UsagePeriod.workspaceId == ids["workspace_id"])
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                return len(rows)
+        finally:
+            await engine.dispose()
+
+    row_count = asyncio.run(run_concurrently())
+    assert row_count == 1
+
+    asyncio.run(_cleanup(ids))
+
+
 def test_report_workspace_current_usage_meters_and_reports_without_raising(monkeypatch) -> None:
     ids = asyncio.run(_fixture())
 

@@ -13,7 +13,18 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, Numeric, String, Text
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -425,9 +436,16 @@ class UsagePeriod(Base):
     component of the hybrid pricing model. publishedItemCount is computed by
     metering.py; reportedCount is how much of that has been pushed to Stripe so
     far (Stripe meter events are additive, so only the delta is ever reported);
-    reportedToStripeAt is the last time a report succeeded."""
+    reportedToStripeAt is the last time a report succeeded.
+
+    The (workspaceId, periodStart) uniqueness is enforced at the DB level by
+    Prisma's migration (CREATE UNIQUE INDEX "UsagePeriod_workspaceId_periodStart_key")
+    regardless of whether this SQLAlchemy model declares it — but declaring it
+    here too (Issue #109) keeps the Python-side model honest about a constraint
+    metering.py's upsert logic actually depends on."""
 
     __tablename__ = "UsagePeriod"
+    __table_args__ = (UniqueConstraint("workspaceId", "periodStart"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
