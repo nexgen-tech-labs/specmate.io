@@ -354,6 +354,9 @@ async def publish_to_github(
 
         assert connection is not None
         existing = update_targets.get(candidate.item_id)
+        # Issue #106: see publish.py's identical comment — close out any open
+        # transaction before the retry-heavy network call.
+        await session.commit()
         if existing is not None:
             issue_number = int(existing.external_key.removeprefix("#"))
             outcome = await gateway.update(

@@ -189,6 +189,63 @@ def _setup_mapping(client: TestClient, project_id: str, format_mode: str = "HUMA
     assert response.status_code == 200, response.text
 
 
+def test_publish_commits_before_calling_gateway_create() -> None:
+    """Issue #106: see test_publish.py's identical test for the Jira router —
+    gateway.create's internal retry-with-backoff loop must not run while the
+    session has an open transaction."""
+    from app.core.db import get_db_session
+
+    ids = asyncio.run(_fixture())
+    fake = _FakeGitHub()
+    captured_session: list[AsyncSession] = []
+    in_transaction_during_create: list[bool] = []
+
+    async def capturing_get_db_session():
+        async with db_module.async_session_factory() as session:
+            captured_session.append(session)
+            yield session
+
+    original_gateway = fake.gateway
+
+    def gateway_with_probe() -> GitHubPublishGateway:
+        gw = original_gateway()
+
+        async def probing_create(*args: object, **kwargs: object) -> GitHubPublishOutcome:
+            assert captured_session, "session should have been captured before create() runs"
+            in_transaction_during_create.append(captured_session[-1].in_transaction())
+            return await gw.create(*args, **kwargs)  # type: ignore[misc]
+
+        return GitHubPublishGateway(
+            connection=gw.connection,
+            repos=gw.repos,
+            meta=gw.meta,
+            create=probing_create,
+            update=gw.update,
+            update_body=gw.update_body,
+            health=gw.health,
+            transport=gw.transport,
+        )
+
+    app.dependency_overrides[get_github_gateway] = gateway_with_probe
+    app.dependency_overrides[get_db_session] = capturing_get_db_session
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        response = client.post(
+            f"/projects/{ids['project_id']}/publish/github", json={"item_ids": [ids["epic_id"]]}
+        )
+    finally:
+        app.dependency_overrides.pop(get_github_gateway, None)
+        app.dependency_overrides.pop(get_db_session, None)
+        _dispose()
+
+    assert response.status_code == 200
+    assert in_transaction_during_create == [False]
+
+    asyncio.run(_cleanup(ids))
+
+
 def test_mapping_upsert_returns_discovery_and_suggests_agent_mode() -> None:
     ids = asyncio.run(_fixture())
     fake = _FakeGitHub()

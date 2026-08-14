@@ -358,6 +358,9 @@ async def publish_to_ado(
 
         assert connection is not None
         existing = update_targets.get(candidate.item_id)
+        # Issue #106: see publish.py's identical comment — close out any open
+        # transaction before the retry-heavy network call.
+        await session.commit()
         if existing is not None:
             numeric_id = int(existing.external_key.removeprefix("AB#"))
             outcome = await gateway.update(

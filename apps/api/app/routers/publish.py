@@ -371,6 +371,15 @@ async def publish_to_jira(
 
         assert connection is not None
         existing = update_targets.get(candidate.item_id)
+        # Issue #106: close out any open transaction (from the batch-level reads
+        # above, or the previous iteration's writes) before the network call —
+        # gateway.create/update's internal retry-with-backoff loop (Issue #89)
+        # can now sleep for several seconds across multiple attempts, and doing
+        # that while holding an idle-in-transaction Postgres connection risks
+        # pool exhaustion under concurrent batch publishes. Safe even though
+        # on_rate_limited (below) touches `session` mid-call: it only calls
+        # session.add(), which stages in memory and needs no open transaction.
+        await session.commit()
         if existing is not None:
             outcome = await gateway.update(
                 connection,

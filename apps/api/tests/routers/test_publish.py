@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.core import db as db_module
 from app.core.config import settings
+from app.core.db import get_db_session
 from app.main import app
 from app.models import (
     AuditEvent,
@@ -294,6 +295,63 @@ def test_publish_orders_hierarchy_links_parents_and_writes_back_keys() -> None:
 
     count, first_key = asyncio.run(check_writeback())
     assert count == 2 and first_key.startswith("KAN-")
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_publish_commits_before_calling_gateway_create() -> None:
+    """Issue #106: gateway.create's internal retry-with-backoff loop (Issue #89)
+    must not run while the router's session has an open transaction — verify
+    directly by having the fake create() callback inspect the real session's
+    in_transaction() state, via a get_db_session override that captures the
+    actual session instance the router is using."""
+    ids = asyncio.run(_fixture())
+    fake = _FakeJira()
+    captured_session: list[AsyncSession] = []
+    in_transaction_during_create: list[bool] = []
+
+    async def capturing_get_db_session():
+        async with db_module.async_session_factory() as session:
+            captured_session.append(session)
+            yield session
+
+    original_gateway = fake.gateway
+
+    def gateway_with_probe() -> PublishGateway:
+        gw = original_gateway()
+
+        async def probing_create(*args: object, **kwargs: object) -> PublishOutcome:
+            assert captured_session, "session should have been captured before create() runs"
+            in_transaction_during_create.append(captured_session[-1].in_transaction())
+            return await gw.create(*args, **kwargs)  # type: ignore[misc]
+
+        return PublishGateway(
+            connection=gw.connection,
+            projects=gw.projects,
+            meta=gw.meta,
+            create=probing_create,
+            update=gw.update,
+            health=gw.health,
+            transport=gw.transport,
+        )
+
+    app.dependency_overrides[get_publish_gateway] = gateway_with_probe
+    app.dependency_overrides[get_db_session] = capturing_get_db_session
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        response = client.post(
+            f"/projects/{ids['project_id']}/publish/jira",
+            json={"item_ids": [ids["epic_id"]]},
+        )
+    finally:
+        app.dependency_overrides.pop(get_publish_gateway, None)
+        app.dependency_overrides.pop(get_db_session, None)
+        _dispose()
+
+    assert response.status_code == 200
+    assert in_transaction_during_create == [False]
 
     asyncio.run(_cleanup(ids))
 
