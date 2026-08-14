@@ -1,6 +1,23 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OnboardingWizard } from './onboarding-wizard';
+
+// Issue #105: lets a test trigger UploadZone's onUploaded callback on demand
+// (simulating a real upload completing) without driving actual XHR upload
+// mechanics — the race under test is purely about React's batching of that
+// callback's setState against a tourAdvanceSignal prop bump, not about the
+// upload transport itself.
+let capturedOnUploaded: ((source: { id: string; status: string }) => void) | null = null;
+vi.mock('@/components/sources/upload-zone', () => ({
+  UploadZone: ({
+    onUploaded,
+  }: {
+    onUploaded?: (source: { id: string; status: string }) => void;
+  }) => {
+    capturedOnUploaded = onUploaded ?? null;
+    return <div data-testid="upload-zone-stub" />;
+  },
+}));
 
 const push = vi.fn();
 vi.mock('next/navigation', () => ({
@@ -294,6 +311,50 @@ describe('OnboardingWizard', () => {
         />,
       );
 
+      expect(document.querySelector('[data-tour="wizard-step-generate"]')).not.toBeNull();
+    });
+
+    it('Issue #105: a manual upload completing in the same batch as a tourAdvanceSignal bump still reads fresh canGenerate', () => {
+      const onStepChange = vi.fn();
+      capturedOnUploaded = null;
+      const { rerender } = render(
+        <OnboardingWizard
+          workspaceId="ws-1"
+          projectId="proj-1"
+          projectName="Payments Portal"
+          hasConnectedTool // starts directly on "upload" (connected || hasSource)
+          hasSource={false} // canGenerate starts false -- no source uploaded yet
+          onStepChange={onStepChange}
+          tourAdvanceSignal={0}
+        />,
+      );
+      expect(document.querySelector('[data-tour="wizard-step-upload"]')).not.toBeNull();
+      expect(capturedOnUploaded).not.toBeNull();
+
+      // Fire the manual upload's onUploaded (setParseStatus('PARSED') inside the
+      // wizard) and the tour's tourAdvanceSignal bump inside the same act() batch,
+      // simulating the near-simultaneous interleaving the issue describes. React
+      // batches both state updates into one re-render, so the tourAdvanceSignal
+      // effect's closure should see the freshly-updated parseStatus/canGenerate,
+      // not a stale value from before the upload completed.
+      act(() => {
+        capturedOnUploaded?.({ id: 'src-1', status: 'PARSED' });
+        rerender(
+          <OnboardingWizard
+            workspaceId="ws-1"
+            projectId="proj-1"
+            projectName="Payments Portal"
+            hasConnectedTool
+            hasSource={false}
+            onStepChange={onStepChange}
+            tourAdvanceSignal={1}
+          />,
+        );
+      });
+
+      // If the race were real, the effect would've read stale canGenerate=false
+      // and left the wizard stuck on "upload" despite the upload having
+      // completed in the very same batch.
       expect(document.querySelector('[data-tour="wizard-step-generate"]')).not.toBeNull();
     });
 
