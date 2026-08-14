@@ -7,7 +7,7 @@ import re
 import time
 from datetime import UTC, datetime, timedelta
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -55,6 +55,46 @@ def _window_start(now: datetime) -> datetime:
     return now.replace(second=0, microsecond=0)
 
 
+async def enforce_rate_limit(session: AsyncSession, workspace_id: str) -> None:
+    """In-handler rate limit enforcement (Issue #104) for endpoints
+    RateLimitMiddleware can't cover because the workspace-resolvable
+    identifier (project_id) lives in the request body, not the URL path —
+    the connector-sync endpoints today. Shares the exact same
+    ApiRateLimitCounter row/tier-limit primitives as the middleware, so these
+    calls count against the same per-workspace per-minute budget rather than
+    a separate pool. Raises HTTPException(429) with the same
+    X-RateLimit-*/Retry-After headers the middleware sets on top of an
+    already-committed increment — the attempt counts toward the budget
+    whether or not it's allowed through, matching the middleware's own
+    behavior."""
+    workspace = await session.get(Workspace, workspace_id)
+    tier = workspace.pricingTier if workspace is not None else PricingTier.STARTER
+    limit = requests_per_minute_for_tier(tier)
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    window_start = _window_start(now)
+    window_reset = window_start + timedelta(minutes=1)
+
+    count = await increment_and_get(session, workspace_id, window_start)
+    await session.commit()
+
+    reset_epoch = int(window_reset.replace(tzinfo=UTC).timestamp())
+    remaining = max(0, limit - count)
+    headers = {
+        "X-RateLimit-Limit": str(limit),
+        "X-RateLimit-Remaining": str(remaining),
+        "X-RateLimit-Reset": str(reset_epoch),
+    }
+    if count > limit:
+        retry_after = max(1, int(window_reset.replace(tzinfo=UTC).timestamp() - time.time()))
+        headers["Retry-After"] = str(retry_after)
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for this workspace.",
+            headers=headers,
+        )
+
+
 async def _resolve_workspace_id(session: AsyncSession, request: Request) -> str | None:
     """Reads workspace identity straight from the URL path via regex — NOT from
     request.path_params, which is empty at this point in BaseHTTPMiddleware's
@@ -79,10 +119,6 @@ async def _resolve_workspace_id(session: AsyncSession, request: Request) -> str 
         (DriftFlag.publishedItemId -> PublishedItem.draftItemId ->
         DraftItem.projectId -> Project.workspaceId), deferred as too deep
         for this pass.
-      - /connectors/{tool}/reference-items/sync,
-        /connectors/confluence/pages/{page_id}/sync,
-        /connectors/slack/channels/{channel_id}/sync — no
-        project/workspace-scoped identifier in the URL path.
       - /connectors/jira/health, /connectors/jira/projects,
         /connectors/ado/health, /connectors/ado/projects,
         /connectors/github/publish-health, /connectors/github/repos —
@@ -91,7 +127,17 @@ async def _resolve_workspace_id(session: AsyncSession, request: Request) -> str 
       - /ai/demo-extract, /billing/meter-usage — no path-based identifier
         at all.
     Any other route matching no known pattern (health checks, etc.) is also
-    not rate-limited."""
+    not rate-limited.
+
+    NOT a gap: /connectors/{tool}/reference-items/sync,
+    /connectors/confluence/pages/{page_id}/sync, and
+    /connectors/slack/channels/{channel_id}/sync are rate limited too (Issue
+    #104) — just not by this middleware. Their workspace-resolvable
+    identifier (project_id) lives in the request body, which this
+    path-based, pre-routing middleware can't cheaply inspect. Each handler
+    calls enforce_rate_limit() directly after resolving project_id from the
+    body, sharing the same per-workspace counter/tier-limit budget this
+    middleware uses."""
     path = request.url.path
 
     project_match = _PROJECT_ID_PATTERN.match(path)

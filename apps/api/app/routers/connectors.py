@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
+from app.core.rate_limit import enforce_rate_limit
 from app.models import Project, PublishTarget, ReferenceItem, Source, SourceKind, SourceStatus
 from app.routers.sources import replace_raw_requirements
 from app.services.connectors.ado import fetch_ado_work_items
@@ -96,8 +97,10 @@ async def sync_reference_items(
         raise HTTPException(
             status_code=400, detail=f"Unknown connector '{tool}' — expected jira, ado, or github."
         )
-    if await session.get(Project, body.project_id) is None:
+    project = await session.get(Project, body.project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
+    await enforce_rate_limit(session, project.workspaceId)
 
     try:
         items = await fetchers.reference[target](body.remote)
@@ -196,8 +199,10 @@ async def sync_confluence_page(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     fetchers: Annotated[ConnectorFetchers, Depends(get_connector_fetchers)],
 ) -> ContentSyncResponse:
-    if await session.get(Project, body.project_id) is None:
+    project = await session.get(Project, body.project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
+    await enforce_rate_limit(session, project.workspaceId)
 
     try:
         page = await fetchers.confluence_page(page_id)
@@ -357,8 +362,10 @@ async def sync_slack_channel(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     fetchers: Annotated[ConnectorFetchers, Depends(get_connector_fetchers)],
 ) -> ContentSyncResponse:
-    if await session.get(Project, body.project_id) is None:
+    project = await session.get(Project, body.project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
+    await enforce_rate_limit(session, project.workspaceId)
 
     channel_label = body.channel_name or channel_id
     try:

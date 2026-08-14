@@ -16,7 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import Project, PublishMapping, RawRequirement, ReferenceItem, Source, Workspace
+from app.models import (
+    ApiRateLimitCounter,
+    Project,
+    PublishMapping,
+    RawRequirement,
+    ReferenceItem,
+    Source,
+    Workspace,
+)
 from app.routers.connectors import ConnectorFetchers, get_connector_fetchers
 from app.services.connectors.confluence import ConfluencePage
 from app.services.connectors.discovery_types import DiscoveryResult, ScopeOption
@@ -72,6 +80,11 @@ async def _cleanup(ids: dict[str, str]) -> None:
                 await session.execute(delete(Source).where(Source.id.in_(source_ids)))
             await session.execute(
                 delete(ReferenceItem).where(ReferenceItem.projectId == ids["project_id"])
+            )
+            await session.execute(
+                delete(ApiRateLimitCounter).where(
+                    ApiRateLimitCounter.workspaceId == ids["workspace_id"]
+                )
             )
             await session.execute(delete(Project).where(Project.id == ids["project_id"]))
             await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
@@ -354,4 +367,62 @@ def test_test_connection_discovery_failure_returns_clean_502() -> None:
         _dispose_app_engine()
 
     assert response.status_code == 502
+
+
+def test_reference_sync_exceeding_rate_limit_returns_429_with_headers() -> None:
+    """Issue #104: reference-items/sync has no workspace-resolvable identifier
+    in its URL path, so RateLimitMiddleware can't cover it — enforce_rate_limit
+    is called in-handler instead, sharing the same per-workspace counter/limit."""
+    ids = asyncio.run(_create_project())
+    body = {"project_id": ids["project_id"], "remote": "PAY"}
+    try:
+        app.dependency_overrides[get_connector_fetchers] = lambda: _fake_fetchers([])
+        # Same TestClient-as-context-manager pattern as
+        # test_rate_limit_middleware.py's test_exceeding_limit_returns_429_with_retry_after
+        # — keeps all 60+ requests on one event loop / connection-pool binding.
+        with TestClient(app) as client:
+            for _ in range(60):
+                response = client.post("/connectors/jira/reference-items/sync", json=body)
+                assert response.status_code == 200
+            blocked = client.post("/connectors/jira/reference-items/sync", json=body)
+    finally:
+        app.dependency_overrides.pop(get_connector_fetchers, None)
+        _dispose_app_engine()
+
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"] == "Rate limit exceeded for this workspace."
+    assert "Retry-After" in blocked.headers
+    assert int(blocked.headers["Retry-After"]) > 0
+    assert blocked.headers["X-RateLimit-Remaining"] == "0"
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_reference_sync_unknown_project_does_not_increment_rate_limit_counter() -> None:
+    ids = asyncio.run(_create_project())
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/connectors/jira/reference-items/sync",
+            json={"project_id": "nonexistent-project-id", "remote": "PAY"},
+        )
+        _dispose_app_engine()
+        assert response.status_code == 404
+
+        async def _count_counter_rows() -> int:
+            engine = create_async_engine(settings.database_url)
+            try:
+                async with AsyncSession(engine) as session:
+                    result = await session.execute(
+                        select(ApiRateLimitCounter).where(
+                            ApiRateLimitCounter.workspaceId == ids["workspace_id"]
+                        )
+                    )
+                    return len(list(result.scalars()))
+            finally:
+                await engine.dispose()
+
+        assert asyncio.run(_count_counter_rows()) == 0
+    finally:
+        asyncio.run(_cleanup(ids))
     asyncio.run(_cleanup(ids))
