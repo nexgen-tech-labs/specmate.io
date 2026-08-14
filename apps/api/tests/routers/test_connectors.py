@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
@@ -288,9 +289,16 @@ def test_test_connection_returns_discovery_data_without_saving_mapping() -> None
         connectors_module.CONNECTOR_REGISTRY["jira"], discovery_fn=fake_discover
     )
     try:
-        response = client.post(
-            f"/workspaces/{ids['workspace_id']}/projects/{ids['project_id']}/connectors/jira/test"
-        )
+        # _resolve_connection (Task 6) resolves Jira via the real env-configured
+        # connection lookup before discovery_fn ever runs — mock it so this test
+        # doesn't depend on JIRA_BASE_URL/ATLASSIAN_EMAIL/ATLASSIAN_API_TOKEN
+        # actually being set in the environment (e.g. CI).
+        with patch(
+            "app.services.connectors.jira_auth.get_jira_connection", return_value=object()
+        ):
+            response = client.post(
+                f"/workspaces/{ids['workspace_id']}/projects/{ids['project_id']}/connectors/jira/test"
+            )
     finally:
         connectors_module.CONNECTOR_REGISTRY["jira"] = dataclasses.replace(
             connectors_module.CONNECTOR_REGISTRY["jira"], discovery_fn=original
@@ -331,9 +339,14 @@ def test_test_connection_discovery_failure_returns_clean_502() -> None:
         connectors_module.CONNECTOR_REGISTRY["jira"], discovery_fn=failing_discover
     )
     try:
-        response = client.post(
-            f"/workspaces/{ids['workspace_id']}/projects/{ids['project_id']}/connectors/jira/test"
-        )
+        # See test_test_connection_returns_discovery_data_without_saving_mapping
+        # for why _resolve_connection needs mocking here too.
+        with patch(
+            "app.services.connectors.jira_auth.get_jira_connection", return_value=object()
+        ):
+            response = client.post(
+                f"/workspaces/{ids['workspace_id']}/projects/{ids['project_id']}/connectors/jira/test"
+            )
     finally:
         connectors_module.CONNECTOR_REGISTRY["jira"] = dataclasses.replace(
             connectors_module.CONNECTOR_REGISTRY["jira"], discovery_fn=original
