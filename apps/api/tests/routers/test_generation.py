@@ -12,10 +12,17 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import anthropic
+import httpx
+
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
 from app.models import (
+    AiCallLog,
     DraftItem,
     GenerationRun,
     Project,
@@ -26,7 +33,13 @@ from app.models import (
     Workspace,
 )
 from app.routers.generation import AI_UNAVAILABLE_DETAIL, get_generation_adapter
-from app.services.ai.adapter import AIGenerationError, GenerationRequest, GenerationResult, UsageInfo
+from app.services.ai.adapter import (
+    AIGenerationError,
+    GenerationRequest,
+    GenerationResult,
+    Message,
+    UsageInfo,
+)
 from tests.audit_cleanup import purge_audit_events
 
 
@@ -531,4 +544,246 @@ def test_regenerate_item_returns_503_when_ai_generation_fails() -> None:
     assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
     assert "SECRET-LOOKING-TOKEN" not in response.text
 
+    asyncio.run(_cleanup(ids))
+
+
+async def _purge_ai_call_logs(workspace_id: str) -> None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            await session.execute(delete(AiCallLog).where(AiCallLog.workspaceId == workspace_id))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+def _fake_claude_response_for(request_body: dict[str, object], chunk_ids: list[str]) -> SimpleNamespace:
+    """Mirrors FakeAdapter's per-pass schema dispatch above, but returns a raw
+    Claude-shaped HTTP response (text content + usage), since this stubs
+    AsyncAnthropic.messages.create rather than AIAdapter.generate — the whole
+    point of Issue #107 is exercising ClaudeAdapter/LoggingAdapter/
+    SchedulingAdapter's real composition, not bypassing it."""
+    import json
+
+    c = chunk_ids
+    schema = request_body["output_config"]["format"]["schema"]  # type: ignore[index]
+    props = set(schema.get("properties", {}))
+    if props == {"clusters"}:
+        data: dict[str, object] = {"clusters": [{"theme": "Payments", "chunk_ids": c}]}
+    elif props == {"epics"}:
+        data = {
+            "epics": [
+                {
+                    "title": "Payments capability",
+                    "description": "Customers pay invoices online.",
+                    "business_value": "Reduces manual invoicing cost.",
+                    "source_chunk_ids": [c[0], c[1]],
+                }
+            ]
+        }
+    elif props == {"stories"}:
+        data = {
+            "stories": [
+                {
+                    "title": "As a customer, I can pay an invoice with a saved card",
+                    "description": "Saved card payment flow.",
+                    "epic_index": 0,
+                    "source_chunk_ids": [c[0]],
+                    "tasks": [
+                        {"title": "Build card vault integration", "description": "Tokenize cards."}
+                    ],
+                }
+            ]
+        }
+    elif props == {"items"}:
+        data = {
+            "items": [
+                {
+                    "type": "ACCEPTANCE_CRITERIA",
+                    "story_index": 0,
+                    "title": "Saved card payment succeeds",
+                    "description": "Given a saved card, when the customer pays, the invoice is settled.",
+                    "extra": {"statement": "Given/When/Then as described"},
+                    "source_chunk_ids": [c[0]],
+                }
+            ]
+        }
+    elif props == {"scores"}:
+        data = {
+            "scores": [
+                {
+                    "item_index": 0, "completeness": 90, "clarity": 88, "testability": 85,
+                    "specificity": 90, "rationale": "Well specified.", "gap_question": None,
+                }
+            ]
+        }
+    else:
+        raise AssertionError(f"unexpected schema properties: {props}")
+
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=json.dumps(data))],
+        usage=SimpleNamespace(
+            input_tokens=100, output_tokens=50,
+            cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        ),
+        stop_reason="end_turn",
+    )
+
+
+def test_real_generation_adapter_composition_produces_a_run_end_to_end() -> None:
+    """Issue #107: exercises the actual, UNMODIFIED get_generation_adapter()
+    composition (SchedulingAdapter(LoggingAdapter(ClaudeAdapter(), session),
+    _ai_scheduler)) through the real /projects/{id}/generate endpoint — every
+    other generation test overrides get_generation_adapter entirely, so this
+    is the only test that would catch a broken composition order, a dropped
+    layer, or the scheduler singleton not being reused. Only ClaudeAdapter's
+    HTTP layer (AsyncAnthropic) is stubbed."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+    workspace_id = str(ids["workspace_id"])
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        return _fake_claude_response_for(kwargs, chunk_ids)
+
+    mock_anthropic_client = SimpleNamespace(
+        messages=SimpleNamespace(create=AsyncMock(side_effect=fake_create))
+    )
+
+    with patch(
+        "app.services.ai.claude_adapter.AsyncAnthropic", return_value=mock_anthropic_client
+    ):
+        client = TestClient(app)
+        response = client.post(f"/projects/{project_id}/generate", json={})
+        _dispose_app_engine()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stats"]["item_count"] >= 1
+
+    async def count_call_logs() -> int:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                result = await session.execute(
+                    select(AiCallLog).where(AiCallLog.workspaceId == workspace_id)
+                )
+                return len(list(result.scalars()))
+        finally:
+            await engine.dispose()
+
+    # LoggingAdapter (the real one, not bypassed) should have written one
+    # AiCallLog row per pass — proves LoggingAdapter is genuinely in the chain.
+    assert asyncio.run(count_call_logs()) == 5
+
+    asyncio.run(_purge_ai_call_logs(workspace_id))
+    asyncio.run(_cleanup(ids))
+
+
+def test_real_generation_adapter_composition_surfaces_rate_limit_as_503() -> None:
+    """Issue #107: the RateLimitError -> AIGenerationError -> 503 translation
+    through the real composed chain, not FailingAdapter's direct bypass."""
+    ids = asyncio.run(_create_fixture())
+    workspace_id = str(ids["workspace_id"])
+    project_id = str(ids["project_id"])
+
+    fake_httpx_response = httpx.Response(
+        status_code=429, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    )
+    rate_limit_error = anthropic.RateLimitError(
+        message="rate limited", response=fake_httpx_response, body=None
+    )
+    mock_anthropic_client = SimpleNamespace(
+        messages=SimpleNamespace(create=AsyncMock(side_effect=rate_limit_error))
+    )
+
+    with patch(
+        "app.services.ai.claude_adapter.AsyncAnthropic", return_value=mock_anthropic_client
+    ):
+        client = TestClient(app)
+        response = client.post(f"/projects/{project_id}/generate", json={})
+        _dispose_app_engine()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
+
+    asyncio.run(_purge_ai_call_logs(workspace_id))
+    asyncio.run(_cleanup(ids))
+
+
+def test_scheduling_adapter_wraps_the_real_singleton_scheduler_around_the_call() -> None:
+    """Issue #107: get_generation_adapter()'s composition puts SchedulingAdapter
+    as the OUTERMOST layer, wrapping the module-level `_ai_scheduler` singleton
+    around every call — verify this directly against the real composed adapter
+    (not a hand-built fake) by spying on the singleton's own `acquire()`, since
+    asserting on GenerationResult.queue_wait_seconds/queue_depth_at_submit alone
+    is a weak signal (they default to 0.0/0 on the dataclass, so a composition
+    that silently dropped SchedulingAdapter entirely would still "pass" a bare
+    >= 0 assertion). Confirmed this spy-based approach actually distinguishes
+    the two cases by temporarily dropping SchedulingAdapter from
+    get_generation_adapter() during development and watching this test fail
+    (call_count == 0) while a >=0 assertion on the result stayed green.
+
+    Note: pipeline.py's _call() currently only reads GenerationResult.data —
+    queue_wait_seconds/queue_depth_at_submit are computed by SchedulingAdapter
+    but never persisted to GenerationRun.stats or surfaced in the API response
+    (a separate, already-flagged gap). This test locks in the
+    composition-level contract Issue #107 asked for; it doesn't claim these
+    fields are end-to-end visible through the HTTP response."""
+    import app.routers.generation as generation_module
+
+    ids = asyncio.run(_create_fixture())
+    workspace_id = str(ids["workspace_id"])
+    project_id = str(ids["project_id"])
+
+    async def fake_create(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text='{"clusters": []}')],
+            usage=SimpleNamespace(
+                input_tokens=10, output_tokens=5,
+                cache_read_input_tokens=0, cache_creation_input_tokens=0,
+            ),
+            stop_reason="end_turn",
+        )
+
+    mock_anthropic_client = SimpleNamespace(
+        messages=SimpleNamespace(create=AsyncMock(side_effect=fake_create))
+    )
+
+    async def run() -> GenerationResult:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                with (
+                    patch(
+                        "app.services.ai.claude_adapter.AsyncAnthropic",
+                        return_value=mock_anthropic_client,
+                    ),
+                    patch.object(
+                        generation_module._ai_scheduler,
+                        "acquire",
+                        wraps=generation_module._ai_scheduler.acquire,
+                    ) as spy_acquire,
+                ):
+                    adapter = generation_module.get_generation_adapter(session)
+                    result = await adapter.generate(
+                        GenerationRequest(
+                            task="clustering",
+                            messages=[Message(role="user", content="cluster this")],
+                            schema_={"type": "object", "properties": {"clusters": {}}},
+                            workspace_id=workspace_id,
+                            project_id=project_id,
+                        )
+                    )
+                    assert spy_acquire.call_count == 1
+                    assert spy_acquire.call_args.args[0] == workspace_id
+                await session.commit()
+                return result
+        finally:
+            await engine.dispose()
+
+    result = asyncio.run(run())
+    assert result.data == {"clusters": []}
+
+    asyncio.run(_purge_ai_call_logs(workspace_id))
     asyncio.run(_cleanup(ids))
