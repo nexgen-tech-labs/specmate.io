@@ -66,6 +66,27 @@ describe('BillingSettings — usage section', () => {
     expect(screen.queryByText(/exceeded your included usage/i)).toBeNull();
   });
 
+  it('shows a visible fallback (not silent nothing) when the usage fetch rejects outright', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('network error')));
+    render(
+      <BillingSettings workspaceId="ws-1" pricingTier="STARTER" subscriptionStatus="ACTIVE" />,
+    );
+    await waitFor(() => expect(screen.getByText(/couldn't load usage/i)).toBeDefined());
+    expect(screen.queryByText(/remaining/i)).toBeNull();
+  });
+
+  it('shows a visible fallback (not silent nothing) when the usage fetch returns a non-200', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({}) }),
+    );
+    render(
+      <BillingSettings workspaceId="ws-1" pricingTier="STARTER" subscriptionStatus="ACTIVE" />,
+    );
+    await waitFor(() => expect(screen.getByText(/couldn't load usage/i)).toBeDefined());
+    expect(screen.queryByText(/remaining/i)).toBeNull();
+  });
+
   it('shows "Unlimited" for an ENTERPRISE workspace with no bar or banner', async () => {
     mockUsageFetch({
       includedItems: null,

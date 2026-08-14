@@ -12,21 +12,39 @@ type UsageDisplayFields = Pick<
 
 function UsageSection({ workspaceId }: { workspaceId: string }) {
   const [usage, setUsage] = useState<UsageDisplayFields | null>(null);
+  const [fetchFailed, setFetchFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     void fetch(`/api/workspaces/${workspaceId}/usage`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: UsageDisplayFields | null) => {
-        if (!cancelled) setUsage(data);
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`status ${res.status}`))))
+      .then((data: UsageDisplayFields) => {
+        if (!cancelled) {
+          setUsage(data);
+          setFetchFailed(false);
+        }
       })
       .catch(() => {
-        if (!cancelled) setUsage(null);
+        if (!cancelled) {
+          setUsage(null);
+          setFetchFailed(true);
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [workspaceId]);
+
+  // An admin near/over quota should see a visible signal that usage failed to
+  // load, not silent nothing indistinguishable from "no usage data yet."
+  if (fetchFailed) {
+    return (
+      <div className="mt-6 border-t border-line pt-6 text-left">
+        <div className="text-sm font-semibold text-ink">Usage this period</div>
+        <p className="mt-2 text-sm text-sub">Couldn&apos;t load usage — try refreshing.</p>
+      </div>
+    );
+  }
 
   if (!usage) return null;
 
