@@ -151,12 +151,12 @@ _ITEMS_V2 = [
 
 def test_jira_reference_sync_then_resync_upserts_without_duplicates() -> None:
     ids = asyncio.run(_create_project())
-    client = TestClient(app)
     body = {"project_id": ids["project_id"], "remote": "PAY"}
 
     app.dependency_overrides[get_connector_fetchers] = lambda: _fake_fetchers(_ITEMS_V1)
     try:
-        first = client.post("/connectors/jira/reference-items/sync", json=body)
+        _dispose_app_engine()
+        first = TestClient(app).post("/connectors/jira/reference-items/sync", json=body)
     finally:
         app.dependency_overrides.pop(get_connector_fetchers, None)
         _dispose_app_engine()
@@ -165,7 +165,7 @@ def test_jira_reference_sync_then_resync_upserts_without_duplicates() -> None:
 
     app.dependency_overrides[get_connector_fetchers] = lambda: _fake_fetchers(_ITEMS_V2)
     try:
-        second = client.post("/connectors/jira/reference-items/sync", json=body)
+        second = TestClient(app).post("/connectors/jira/reference-items/sync", json=body)
     finally:
         app.dependency_overrides.pop(get_connector_fetchers, None)
         _dispose_app_engine()
