@@ -16,16 +16,13 @@ posture as the rest of the connector code in this codebase.
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 
 import stripe
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models import UsagePeriod, Workspace
-
-USAGE_EVENT_NAME = os.environ.get("STRIPE_USAGE_EVENT_NAME", "published_item")
-USAGE_METER_ID = os.environ.get("STRIPE_USAGE_METER_ID", "")
 
 
 class BillingNotConfiguredError(Exception):
@@ -33,20 +30,31 @@ class BillingNotConfiguredError(Exception):
 
 
 def _client() -> stripe.StripeClient:
-    key = os.environ.get("STRIPE_SECRET_KEY")
-    if not key:
+    if not settings.stripe_secret_key:
         raise BillingNotConfiguredError(
             "STRIPE_SECRET_KEY is not set — usage cannot be reported to Stripe."
         )
-    return stripe.StripeClient(key)
+    return stripe.StripeClient(settings.stripe_secret_key)
 
 
 async def report_usage_period(session: AsyncSession, usage_period: UsagePeriod) -> int | None:
     """Reports the delta (publishedItemCount - reportedCount) as one meter event,
-    then updates reportedCount/reportedToStripeAt on the row (caller commits).
-    Returns the reported delta, or None if there was nothing new to report
-    (delta <= 0) or the workspace has no Stripe customer yet (e.g. ENTERPRISE
-    tier, not self-serve billed)."""
+    then updates and COMMITS reportedCount/reportedToStripeAt on the row itself
+    (Issue #110) — not left for the caller to commit later. Returns the
+    reported delta, or None if there was nothing new to report (delta <= 0) or
+    the workspace has no Stripe customer yet (e.g. ENTERPRISE tier, not
+    self-serve billed).
+
+    Committing here (not just updating in-memory) closes a narrow
+    double-report window: if reportedCount were only updated in-memory and the
+    caller's own commit later failed or was interrupted, a retry would re-read
+    the stale (pre-update) reportedCount and could recompute an overlapping
+    delta — the `identifier` alone doesn't protect against this, since it's
+    built from publishedItemCount, which can change between the failed
+    attempt and the retry, so Stripe's own event-identifier dedup wouldn't
+    necessarily catch it. Committing immediately after the Stripe call
+    succeeds means a crash after this point can't lose the fact that the
+    report already happened."""
     workspace = await session.get(Workspace, usage_period.workspaceId)
     if workspace is None or not workspace.stripeCustomerId:
         return None
@@ -59,7 +67,7 @@ async def report_usage_period(session: AsyncSession, usage_period: UsagePeriod) 
     identifier = f"{usage_period.id}:{usage_period.publishedItemCount}"
     client.v1.billing.meter_events.create(
         params={
-            "event_name": USAGE_EVENT_NAME,
+            "event_name": settings.stripe_usage_event_name,
             "identifier": identifier,
             "payload": {
                 "stripe_customer_id": workspace.stripeCustomerId,
@@ -69,6 +77,7 @@ async def report_usage_period(session: AsyncSession, usage_period: UsagePeriod) 
     )
     usage_period.reportedCount = usage_period.publishedItemCount
     usage_period.reportedToStripeAt = datetime.now(UTC).replace(tzinfo=None)
+    await session.commit()
     return delta
 
 
@@ -81,14 +90,14 @@ async def fetch_stripe_reported_total(workspace: Workspace, usage_period: UsageP
     fail-loud posture as report_usage_period."""
     if not workspace.stripeCustomerId:
         raise ValueError(f"Workspace {workspace.id} has no stripeCustomerId — nothing to reconcile")
-    if not USAGE_METER_ID:
+    if not settings.stripe_usage_meter_id:
         raise BillingNotConfiguredError("STRIPE_USAGE_METER_ID is not set.")
     client = _client()
 
     start_ts = int(usage_period.periodStart.replace(tzinfo=UTC).timestamp())
     end_ts = int(usage_period.periodEnd.replace(tzinfo=UTC).timestamp())
     summaries = client.v1.billing.meters.event_summaries.list(
-        id=USAGE_METER_ID,
+        id=settings.stripe_usage_meter_id,
         params={
             "customer": workspace.stripeCustomerId,
             "start_time": start_ts,

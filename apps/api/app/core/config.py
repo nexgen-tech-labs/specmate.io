@@ -47,6 +47,16 @@ class Settings(BaseSettings):
     # anything auth-sensitive; the wizard session id embedded in the redirect
     # is validated server-side same as before.
     web_base_url: str = "http://localhost:3000"
+    # Stripe usage-based billing (Issues 10.9/12.5). Issue #110: moved from raw
+    # os.environ.get(...) reads in stripe_reporting.py to match every other
+    # external credential in this codebase. stripe_usage_event_name/
+    # stripe_usage_meter_id predate Issue #92 (already existed as raw env
+    # reads); stripe_usage_meter_id was added by #92, extending the existing
+    # inconsistency rather than introducing a new one — all three are cleaned
+    # up together here rather than piecemeal.
+    stripe_secret_key: str = ""
+    stripe_usage_event_name: str = "published_item"
+    stripe_usage_meter_id: str = ""
 
 
 settings = Settings()

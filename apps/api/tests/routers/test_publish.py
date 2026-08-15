@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
@@ -358,9 +359,14 @@ def test_publish_commits_before_calling_gateway_create() -> None:
 
 def test_publish_succeeds_even_when_stripe_is_not_configured() -> None:
     """Issue 12.5: publish now inline-reports usage to Stripe after a successful
-    publish. STRIPE_SECRET_KEY isn't set in the test env, so the inline report
-    hits BillingNotConfiguredError internally — this locks in that the publish
-    request still succeeds (200, PublishedItem created) despite that."""
+    publish. Pinned explicitly (Issue #110) rather than relying on
+    STRIPE_SECRET_KEY being ambiently absent from the test env — the inline
+    report hits BillingNotConfiguredError internally, and this locks in that
+    the publish request still succeeds (200, PublishedItem created) despite
+    that, regardless of what a local .env might otherwise leak into the test
+    process. settings.stripe_secret_key (not the raw env var) is what
+    stripe_reporting.py actually reads (Issue #110's Settings migration), so
+    it's patched directly rather than via monkeypatch.delenv."""
     ids = asyncio.run(_fixture())
     fake = _FakeJira()
     app.dependency_overrides[get_publish_gateway] = fake.gateway
@@ -368,10 +374,11 @@ def test_publish_succeeds_even_when_stripe_is_not_configured() -> None:
     try:
         _setup_mapping(client, ids["project_id"])
         _dispose()
-        response = client.post(
-            f"/projects/{ids['project_id']}/publish/jira",
-            json={"item_ids": [ids["epic_id"]]},
-        )
+        with patch.object(settings, "stripe_secret_key", ""):
+            response = client.post(
+                f"/projects/{ids['project_id']}/publish/jira",
+                json={"item_ids": [ids["epic_id"]]},
+            )
     finally:
         app.dependency_overrides.pop(get_publish_gateway, None)
         _dispose()
