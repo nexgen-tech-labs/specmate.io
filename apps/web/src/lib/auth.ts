@@ -8,6 +8,13 @@ import { verifyPassword } from './password';
 import { resolveOAuthSignIn, resolveUserIdForOAuthAccount } from './oauth-linking';
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+  // Azure Container Apps terminates TLS and proxies requests internally
+  // (the app itself only ever sees the container's internal hostname unless
+  // this is set) — trustHost tells Auth.js to trust the Host header Container
+  // Apps' ingress forwards, same role AUTH_URL/NEXTAUTH_URL would play if we
+  // pinned a single fixed origin. Safe here because Container Apps' ingress
+  // is the only thing that can set that header before it reaches this app.
+  trustHost: true,
   session: { strategy: 'jwt' },
   pages: { signIn: '/login' },
   providers: [
