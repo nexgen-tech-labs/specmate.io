@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthenticateStep } from './authenticate';
 import type { ConnectorDefinition } from '../types';
@@ -21,6 +21,18 @@ const OAUTH_CONNECTOR: ConnectorDefinition = {
     supports_native_hierarchy: false,
     type_system: 'PUBLISHABLE_SET',
     parent_link_strategy: 'TASK_LIST_BACKFILL',
+  },
+};
+
+const JIRA_OAUTH_CONNECTOR: ConnectorDefinition = {
+  tool_key: 'jira',
+  display_name: 'Jira',
+  auth_methods: ['ENV_CONFIGURED', 'OAUTH'],
+  scope_picker_type: 'PROJECT_KEY',
+  capabilities: {
+    supports_native_hierarchy: true,
+    type_system: 'NAMED_TYPES',
+    parent_link_strategy: 'NATIVE_FIELD',
   },
 };
 
@@ -60,6 +72,53 @@ describe('AuthenticateStep', () => {
 
     expect(screen.getByRole('button', { name: /connect with github/i })).toBeDefined();
   });
+
+  it.each([
+    { toolKey: 'github', connector: OAUTH_CONNECTOR },
+    { toolKey: 'jira', connector: JIRA_OAUTH_CONNECTOR },
+  ])(
+    'points the OAuth button at /api/connectors/$toolKey/oauth/start for a $toolKey connector',
+    async ({ toolKey, connector }) => {
+      vi.stubGlobal('fetch', vi.fn());
+
+      // jsdom doesn't implement navigation; stub location so we can observe
+      // the href assignment the click handler makes, per connector.
+      const originalLocation = window.location;
+      const locationStub = { href: '' } as unknown as Location;
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: locationStub,
+      });
+
+      try {
+        render(
+          <AuthenticateStep
+            workspaceId="ws"
+            projectId="proj"
+            toolKey={toolKey}
+            wizardSessionId="wiz-1"
+            connector={connector}
+            collectedState={{}}
+            onAdvance={vi.fn()}
+          />,
+        );
+
+        const button = screen.getByRole('button', {
+          name: new RegExp(`connect with ${connector.display_name}`, 'i'),
+        });
+        fireEvent.click(button);
+
+        expect(window.location.href).toBe(
+          `/api/connectors/${toolKey}/oauth/start?wizard_session_id=wiz-1`,
+        );
+      } finally {
+        Object.defineProperty(window, 'location', {
+          configurable: true,
+          value: originalLocation,
+        });
+      }
+    },
+  );
 
   it('does not render an OAuth button for an ENV_CONFIGURED-only connector', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ok: true, account: 'bot' })));

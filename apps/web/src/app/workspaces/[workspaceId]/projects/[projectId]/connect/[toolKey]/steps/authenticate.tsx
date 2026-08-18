@@ -109,7 +109,7 @@ export function AuthenticateStep({
         <button
           type="button"
           onClick={() => {
-            window.location.href = `/api/connectors/github/oauth/start?wizard_session_id=${encodeURIComponent(
+            window.location.href = `/api/connectors/${toolKey}/oauth/start?wizard_session_id=${encodeURIComponent(
               wizardSessionId,
             )}`;
           }}
