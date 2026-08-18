@@ -17,6 +17,7 @@ from app.services.connectors.jira_auth import (
     JiraOAuthConnection,
     resolve_jira_connection,
 )
+from app.services.connectors.types import ConnectorError
 from app.services.crypto import encrypt_credentials
 
 _TEST_DEK_B64 = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
@@ -188,5 +189,104 @@ def test_resolve_with_expired_oauth_connection_refreshes_and_persists_rotated_to
             persisted = json.loads(decrypt_credentials(row.encryptedCredentials))
         assert persisted["access_token"] == "rotated-token"
         assert persisted["refresh_token"] == "refresh-2"
+    finally:
+        _cleanup(workspace_id)
+
+
+def test_resolve_recovers_when_a_concurrent_refresh_already_rotated_the_token() -> None:
+    """Atlassian rotates the refresh token on every use — if a concurrent
+    request already refreshed and persisted a new token by the time this
+    call's own refresh attempt fails (using the now-stale refresh token), the
+    resolver must re-read the row and use the concurrently-refreshed result
+    instead of propagating a spurious error."""
+    from unittest.mock import AsyncMock
+
+    workspace_id = _create_workspace()
+    try:
+        past_expiry = time.time() - timedelta(minutes=5).total_seconds()
+        _add_connection(
+            workspace_id,
+            auth_method="OAUTH",
+            tokens={"access_token": "stale-token", "refresh_token": "refresh-1", "expires_at": past_expiry},
+            cloud_id="cloud-id-abc",
+        )
+
+        async def _simulate_concurrent_refresh_then_fail(refresh_token: str) -> object:
+            # Simulates: another request refreshed and persisted first, using
+            # the same refresh_token this call is about to try — so by the
+            # time THIS call's refresh attempt reaches Atlassian, the token
+            # has already been rotated out from under it. Updates the
+            # existing row in place (a real concurrent resolve_jira_connection
+            # call would UPDATE, not INSERT a second row for the same
+            # workspace/toolKey — that's the @@unique constraint's job).
+            engine = create_async_engine(settings.database_url)
+            try:
+                async with AsyncSession(engine) as inner_session:
+                    from sqlalchemy import select as _select
+
+                    row = (
+                        await inner_session.execute(
+                            _select(Connection).where(
+                                Connection.workspaceId == workspace_id, Connection.toolKey == "jira"
+                            )
+                        )
+                    ).scalar_one()
+                    row.encryptedCredentials = encrypt_credentials(
+                        json.dumps(
+                            {
+                                "access_token": "concurrently-rotated-token",
+                                "refresh_token": "refresh-2",
+                                "expires_at": time.time() + 3600,
+                            }
+                        )
+                    )
+                    await inner_session.commit()
+            finally:
+                await engine.dispose()
+            raise ConnectorError("refresh_token is invalid — already used")
+
+        with (
+            patch.object(settings, "connector_dek_b64", _TEST_DEK_B64),
+            patch(
+                "app.services.connectors.jira_auth.refresh_jira_access_token",
+                new=AsyncMock(side_effect=_simulate_concurrent_refresh_then_fail),
+            ),
+        ):
+            connection = _resolve(workspace_id)
+
+        assert isinstance(connection, JiraOAuthConnection)
+        assert connection.access_token == "concurrently-rotated-token"
+    finally:
+        _cleanup(workspace_id)
+
+
+def test_resolve_propagates_a_genuine_refresh_failure_not_caused_by_a_race() -> None:
+    """If refresh_jira_access_token fails and the row genuinely was NOT
+    refreshed by anyone else (e.g. the user actually revoked access), the
+    error must propagate — not be silently swallowed."""
+    from unittest.mock import AsyncMock
+
+    workspace_id = _create_workspace()
+    try:
+        past_expiry = time.time() - timedelta(minutes=5).total_seconds()
+        _add_connection(
+            workspace_id,
+            auth_method="OAUTH",
+            tokens={"access_token": "stale-token", "refresh_token": "refresh-1", "expires_at": past_expiry},
+            cloud_id="cloud-id-abc",
+        )
+
+        with (
+            patch.object(settings, "connector_dek_b64", _TEST_DEK_B64),
+            patch(
+                "app.services.connectors.jira_auth.refresh_jira_access_token",
+                new=AsyncMock(side_effect=ConnectorError("access has been revoked")),
+            ),
+        ):
+            try:
+                _resolve(workspace_id)
+                raise AssertionError("expected ConnectorError to propagate")
+            except ConnectorError as exc:
+                assert "revoked" in str(exc)
     finally:
         _cleanup(workspace_id)

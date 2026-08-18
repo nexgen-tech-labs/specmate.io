@@ -21,7 +21,7 @@ import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, cast
+from typing import Protocol
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -295,10 +295,34 @@ async def resolve_jira_connection(session: AsyncSession, workspace_id: str) -> J
     ).scalar_one_or_none()
     if row and row.authMethod == "OAUTH" and row.encryptedCredentials:
         cloud_id = (row.scope or {}).get("cloud_id")
-        assert isinstance(cloud_id, str)
+        if not isinstance(cloud_id, str):
+            raise ConnectorError(
+                f"Jira Connection for workspace {workspace_id} has no cloud_id in scope — reconnect required."
+            )
         tokens: dict[str, object] = json.loads(decrypt_credentials(row.encryptedCredentials))
-        if float(cast(str, tokens["expires_at"])) <= time.time():
-            fresh = await refresh_jira_access_token(str(tokens["refresh_token"]))
+        if float(tokens["expires_at"]) <= time.time():  # type: ignore[arg-type]
+            try:
+                fresh = await refresh_jira_access_token(str(tokens["refresh_token"]))
+            except ConnectorError:
+                # Atlassian rotates the refresh token on every use — two
+                # concurrent requests both seeing an expired token can both
+                # attempt to refresh with the same (now-stale-after-the-first-
+                # succeeds) refresh token, and the second attempt is rejected.
+                # Re-fetch the row: if a concurrent request already refreshed
+                # it (expires_at moved forward), use that result instead of
+                # failing this request too. If the row genuinely wasn't
+                # refreshed, the original error is real (e.g. revoked access)
+                # and propagates.
+                await session.refresh(row)
+                if row.encryptedCredentials:
+                    retried_tokens: dict[str, object] = json.loads(
+                        decrypt_credentials(row.encryptedCredentials)
+                    )
+                    if float(retried_tokens["expires_at"]) > time.time():  # type: ignore[arg-type]
+                        return JiraOAuthConnection(
+                            access_token=str(retried_tokens["access_token"]), cloud_id=cloud_id
+                        )
+                raise
             expires_at = time.time() + fresh.expires_in
             tokens = {
                 "access_token": fresh.access_token,
