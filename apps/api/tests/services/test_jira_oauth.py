@@ -117,3 +117,23 @@ async def test_discover_accessible_jira_sites_raises_on_empty_list() -> None:
     with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=_EmptyResponse())):
         with pytest.raises(ConnectorError):
             await discover_accessible_jira_sites("fake-access-token")
+
+
+@pytest.mark.asyncio
+async def test_discover_accessible_jira_sites_raises_connector_error_on_malformed_entry() -> None:
+    """A response entry missing an expected key (id/url/name) must surface as
+    ConnectorError, not an unhandled KeyError — callers of this module only
+    catch ConnectorError, per its own documented contract."""
+
+    class _MalformedResponse:
+        status_code = 200
+
+        def json(self) -> list[dict[str, object]]:
+            return [{"url": "https://acme.atlassian.net", "name": "Acme"}]  # missing "id"
+
+        def raise_for_status(self) -> None:
+            pass
+
+    with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=_MalformedResponse())):
+        with pytest.raises(ConnectorError):
+            await discover_accessible_jira_sites("fake-access-token")

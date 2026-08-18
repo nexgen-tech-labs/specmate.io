@@ -229,9 +229,12 @@ async def discover_accessible_jira_sites(access_token: str) -> list[JiraSite]:
             response.raise_for_status()
     except httpx.HTTPError as exc:
         raise ConnectorError(f"Jira accessible-resources lookup failed: {exc}") from exc
-    sites = [
-        JiraSite(cloud_id=r["id"], url=r["url"], name=r["name"]) for r in response.json()
-    ]
+    try:
+        sites = [
+            JiraSite(cloud_id=r["id"], url=r["url"], name=r["name"]) for r in response.json()
+        ]
+    except (KeyError, TypeError) as exc:
+        raise ConnectorError(f"Jira accessible-resources response was malformed: {exc}") from exc
     if not sites:
         raise ConnectorError(
             "This Atlassian account has no accessible Jira site — grant access to at least one Jira Cloud site."
