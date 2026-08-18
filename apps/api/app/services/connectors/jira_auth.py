@@ -17,9 +17,11 @@ Deployment-mode differences to know for a future Server/DC implementation
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import UTC, datetime
+from typing import Protocol, cast
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -240,6 +242,74 @@ async def discover_accessible_jira_sites(access_token: str) -> list[JiraSite]:
             "This Atlassian account has no accessible Jira site — grant access to at least one Jira Cloud site."
         )
     return sites
+
+
+class _JiraBearerAuth(httpx.Auth):
+    """Static Bearer auth — unlike ADO's self-refreshing _OAuthBearerAuth,
+    refresh happens explicitly in resolve_jira_connection() before this class
+    is even constructed, since a rotated refresh token must be written back
+    to the DB, which an httpx.Auth.auth_flow() generator can't cleanly do
+    mid-request."""
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    def auth_flow(self, request: httpx.Request):  # type: ignore[no-untyped-def]
+        request.headers["Authorization"] = f"Bearer {self._token}"
+        yield request
+
+
+@dataclass(frozen=True)
+class JiraOAuthConnection:
+    """Satisfies the JiraConnection Protocol using a per-workspace OAuth 3LO
+    access token + the cloudId gateway (decrypted/refreshed at resolution
+    time via resolve_jira_connection — never persisted in plaintext), instead
+    of CloudTokenConnection's env-configured email+API-token basic auth."""
+
+    access_token: str
+    cloud_id: str
+
+    def base_url(self) -> str:
+        return f"https://api.atlassian.com/ex/jira/{self.cloud_id}"
+
+    def auth(self) -> httpx.Auth:
+        return _JiraBearerAuth(self.access_token)
+
+    def api_version(self) -> str:
+        return "3"
+
+
+async def resolve_jira_connection(session: AsyncSession, workspace_id: str) -> JiraConnection:
+    """Per-workspace connection resolution (fast-follow to Issue #101):
+    prefers a stored OAuth Connection for this workspace, transparently
+    refreshing an expired access token (persisting the rotated refresh
+    token — Atlassian invalidates the old one on every refresh), falls back
+    to the existing single-tenant env-configured connection unchanged."""
+    from app.models import Connection
+    from app.services.crypto import decrypt_credentials, encrypt_credentials
+
+    row = (
+        await session.execute(
+            select(Connection).where(Connection.workspaceId == workspace_id, Connection.toolKey == "jira")
+        )
+    ).scalar_one_or_none()
+    if row and row.authMethod == "OAUTH" and row.encryptedCredentials:
+        cloud_id = (row.scope or {}).get("cloud_id")
+        assert isinstance(cloud_id, str)
+        tokens: dict[str, object] = json.loads(decrypt_credentials(row.encryptedCredentials))
+        if float(cast(str, tokens["expires_at"])) <= time.time():
+            fresh = await refresh_jira_access_token(str(tokens["refresh_token"]))
+            expires_at = time.time() + fresh.expires_in
+            tokens = {
+                "access_token": fresh.access_token,
+                "refresh_token": fresh.refresh_token,
+                "expires_at": expires_at,
+            }
+            row.encryptedCredentials = encrypt_credentials(json.dumps(tokens))
+            row.updatedAt = datetime.now(UTC).replace(tzinfo=None)
+            await session.commit()
+        return JiraOAuthConnection(access_token=str(tokens["access_token"]), cloud_id=cloud_id)
+    return get_jira_connection()
 
 
 def get_jira_connection() -> CloudTokenConnection:
