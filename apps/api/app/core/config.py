@@ -47,6 +47,24 @@ class Settings(BaseSettings):
     # anything auth-sensitive; the wizard session id embedded in the redirect
     # is validated server-side same as before.
     web_base_url: str = "http://localhost:3000"
+    # Atlassian OAuth App (fast-follow to Issue #101) — for per-workspace
+    # delegated Jira connector auth, distinct from JIRA_BASE_URL/
+    # ATLASSIAN_EMAIL/ATLASSIAN_API_TOKEN (the existing single-tenant
+    # env-configured fallback, kept unchanged). Register at
+    # https://developer.atlassian.com/console/myapps/ with OAuth 2.0 (3LO),
+    # scopes read:jira-work + write:jira-work + offline_access, callback URL
+    # {this API's own external URL}/connectors/jira/oauth/callback.
+    jira_oauth_app_client_id: str = ""
+    jira_oauth_app_client_secret: str = ""
+    # This API's own externally-reachable base URL (Atlassian calls the Jira
+    # OAuth redirect_uri directly, unlike GitHub's OAuth flow, whose
+    # redirect_uri is configured once in the GitHub OAuth App's settings and
+    # never sent by SpecMate at request time). specmate-api's Container App
+    # ingress is currently internal-only — see Task 3's open infrastructure
+    # question about whether ingress needs to become external, or the
+    # callback should route through apps/web's proxy instead, before this
+    # setting's production value can be finalized.
+    api_base_url_external: str = "http://localhost:8000"
     # Stripe usage-based billing (Issues 10.9/12.5). Issue #110: moved from raw
     # os.environ.get(...) reads in stripe_reporting.py to match every other
     # external credential in this codebase. stripe_usage_event_name/

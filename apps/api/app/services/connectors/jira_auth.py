@@ -126,6 +126,119 @@ class ConnectJwtConnection:
         return "3"
 
 
+@dataclass(frozen=True)
+class JiraOAuthTokens:
+    access_token: str
+    refresh_token: str
+    expires_in: int
+
+
+@dataclass(frozen=True)
+class JiraSite:
+    cloud_id: str
+    url: str
+    name: str
+
+
+_ATLASSIAN_TOKEN_URL = "https://auth.atlassian.com/oauth/token"
+_ATLASSIAN_ACCESSIBLE_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessible-resources"
+
+
+async def exchange_oauth_code_for_tokens(code: str, redirect_uri: str) -> JiraOAuthTokens:
+    """Jira OAuth 3LO authorization-code exchange (fast-follow to Issue #101's
+    wizard OAuth step). Mirrors github_auth.py's exchange_oauth_code_for_token,
+    but Jira returns a refresh_token too (access tokens expire in ~1 hour)."""
+    if not settings.jira_oauth_app_client_id or not settings.jira_oauth_app_client_secret:
+        raise ConnectorError("Jira OAuth App is not configured.")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                _ATLASSIAN_TOKEN_URL,
+                headers={"Accept": "application/json"},
+                json={
+                    "grant_type": "authorization_code",
+                    "client_id": settings.jira_oauth_app_client_id,
+                    "client_secret": settings.jira_oauth_app_client_secret,
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ConnectorError(f"Jira OAuth token exchange request failed: {exc}") from exc
+    payload = response.json()
+    access_token = payload.get("access_token")
+    refresh_token = payload.get("refresh_token")
+    if not access_token or not refresh_token:
+        raise ConnectorError(
+            f"Jira OAuth token exchange failed: {payload.get('error_description', payload.get('error', 'unknown error'))}"
+        )
+    return JiraOAuthTokens(
+        access_token=str(access_token),
+        refresh_token=str(refresh_token),
+        expires_in=int(payload.get("expires_in", 3600)),
+    )
+
+
+async def refresh_jira_access_token(refresh_token: str) -> JiraOAuthTokens:
+    """Atlassian rotates the refresh token on every use — callers MUST persist
+    the returned refresh_token (not reuse the old one), or the next refresh
+    attempt fails with an invalidated token."""
+    if not settings.jira_oauth_app_client_id or not settings.jira_oauth_app_client_secret:
+        raise ConnectorError("Jira OAuth App is not configured.")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                _ATLASSIAN_TOKEN_URL,
+                headers={"Accept": "application/json"},
+                json={
+                    "grant_type": "refresh_token",
+                    "client_id": settings.jira_oauth_app_client_id,
+                    "client_secret": settings.jira_oauth_app_client_secret,
+                    "refresh_token": refresh_token,
+                },
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ConnectorError(f"Jira OAuth token refresh request failed: {exc}") from exc
+    payload = response.json()
+    access_token = payload.get("access_token")
+    new_refresh_token = payload.get("refresh_token")
+    if not access_token or not new_refresh_token:
+        raise ConnectorError(
+            f"Jira OAuth token refresh failed: {payload.get('error_description', payload.get('error', 'unknown error'))}"
+        )
+    return JiraOAuthTokens(
+        access_token=str(access_token),
+        refresh_token=str(new_refresh_token),
+        expires_in=int(payload.get("expires_in", 3600)),
+    )
+
+
+async def discover_accessible_jira_sites(access_token: str) -> list[JiraSite]:
+    """GET accessible-resources — the Jira Cloud sites this OAuth grant
+    covers. Empty list means the user completed OAuth consent but the grant
+    somehow covers no Jira site (e.g. they only have Confluence access) —
+    treated as a configuration error, not a valid zero-site state."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(
+                _ATLASSIAN_ACCESSIBLE_RESOURCES_URL,
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ConnectorError(f"Jira accessible-resources lookup failed: {exc}") from exc
+    sites = [
+        JiraSite(cloud_id=r["id"], url=r["url"], name=r["name"]) for r in response.json()
+    ]
+    if not sites:
+        raise ConnectorError(
+            "This Atlassian account has no accessible Jira site — grant access to at least one Jira Cloud site."
+        )
+    return sites
+
+
 def get_jira_connection() -> CloudTokenConnection:
     if not (settings.jira_base_url and settings.atlassian_email and settings.atlassian_api_token):
         raise ConnectorError(
