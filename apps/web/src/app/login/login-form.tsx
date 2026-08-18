@@ -7,7 +7,8 @@ import { signIn } from 'next-auth/react';
 function LoginFormInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const callbackUrl = searchParams.get('callbackUrl') ?? '/';
+  const explicitCallbackUrl = searchParams.get('callbackUrl');
+  const callbackUrl = explicitCallbackUrl ?? '/';
   const oauthError = searchParams.get('error');
 
   const [email, setEmail] = useState('');
@@ -27,7 +28,18 @@ function LoginFormInner() {
           setSubmitting(false);
           return;
         }
-        router.push(callbackUrl);
+        if (explicitCallbackUrl) {
+          router.push(explicitCallbackUrl);
+        } else {
+          // No explicit destination (user landed on /login directly, not via
+          // proxy.ts's redirect from a protected route) — resolve their
+          // workspace the same way the landing page's sign-in modal does.
+          const res = await fetch('/api/me/workspace');
+          const { workspaceId }: { workspaceId: string | null } = res.ok
+            ? await res.json()
+            : { workspaceId: null };
+          router.push(workspaceId ? `/workspaces/${workspaceId}` : '/onboarding');
+        }
         router.refresh();
       }}
       className="rounded-lg border border-line bg-panel p-8"

@@ -101,7 +101,11 @@ export function SignInModal({ authMode, onModeChange, onClose, onBackHome }: Sig
               return;
             }
             onClose();
-            router.push('/');
+            const res = await fetch('/api/me/workspace');
+            const { workspaceId }: { workspaceId: string | null } = res.ok
+              ? await res.json()
+              : { workspaceId: null };
+            router.push(workspaceId ? `/workspaces/${workspaceId}` : '/onboarding');
             router.refresh();
           }}
           className="grid gap-2"

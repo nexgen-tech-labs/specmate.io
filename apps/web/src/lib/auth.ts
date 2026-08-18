@@ -122,7 +122,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (result.outcome === 'blocked_existing_account') {
         return '/login?error=AccountExists';
       }
-      return true;
+      // Returning a string here redirects the user there (Auth.js's own
+      // mechanism — the separate `redirect` callback only receives
+      // { url, baseUrl }, no user context, so it can't make this decision)
+      // — sends a just-signed-in OAuth user straight to their workspace
+      // instead of the static landing page, same destination the credentials
+      // sign-in modal resolves via GET /api/me/workspace.
+      const membership = await prisma.workspaceMember.findFirst({
+        where: { userId: result.userId },
+        orderBy: { createdAt: 'asc' },
+        select: { workspaceId: true },
+      });
+      return membership ? `/workspaces/${membership.workspaceId}` : '/onboarding';
     },
     async jwt({ token, user, account }) {
       if (account && account.provider !== 'credentials') {
