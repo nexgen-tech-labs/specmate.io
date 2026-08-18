@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -18,6 +20,7 @@ from app.core.db import get_db_session
 from app.main import app
 from app.models import (
     AuditEvent,
+    Connection,
     DraftItem,
     Project,
     PublishedItem,
@@ -27,9 +30,12 @@ from app.models import (
     Workspace,
 )
 from app.routers.publish import PublishGateway, get_publish_gateway
-from app.services.connectors.jira_auth import CloudTokenConnection
+from app.services.connectors.jira_auth import CloudTokenConnection, JiraOAuthConnection
 from app.services.connectors.jira_publish import PublishCandidate, PublishOutcome
+from app.services.crypto import encrypt_credentials
 from tests.audit_cleanup import purge_audit_events
+
+_TEST_DEK_B64 = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
 
 _FAKE_META: dict[str, object] = {
     "project_key": "KAN",
@@ -121,8 +127,11 @@ class _FakeJira:
         async def fake_health(_conn: object) -> dict[str, object]:
             return {"ok": True, "account": "fake"}
 
+        async def fake_connection(_session: object, _workspace_id: str) -> CloudTokenConnection:
+            return CloudTokenConnection("e", "t", "https://x")
+
         return PublishGateway(
-            connection=lambda: CloudTokenConnection("e", "t", "https://x"),
+            connection=fake_connection,
             projects=fake_projects,
             meta=fake_meta,
             create=fake_create,
@@ -664,3 +673,158 @@ def test_publishing_a_targeted_regen_revision_updates_not_duplicates() -> None:
     assert draft_item_id == revised_id
 
     asyncio.run(_cleanup(ids, extra_item_ids=[revised_id]))
+
+
+async def _add_oauth_connection(workspace_id: str) -> None:
+    """Stores a live (unexpired) Jira OAuth Connection row for a workspace —
+    mirrors test_jira_connection_resolution.py's fixture shape."""
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            now = _now()
+            tokens = {
+                "access_token": "oauth-access-token",
+                "refresh_token": "oauth-refresh-token",
+                "expires_at": time.time() + 3600,
+            }
+            with patch.object(settings, "connector_dek_b64", _TEST_DEK_B64):
+                encrypted = encrypt_credentials(json.dumps(tokens))
+            session.add(
+                Connection(
+                    workspaceId=workspace_id,
+                    toolKey="jira",
+                    authMethod="OAUTH",
+                    encryptedCredentials=encrypted,
+                    scope={"cloud_id": "cloud-id-abc"},
+                    createdAt=now,
+                    updatedAt=now,
+                )
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def _cleanup_connection(workspace_id: str) -> None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            await session.execute(delete(Connection).where(Connection.workspaceId == workspace_id))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+def test_publish_with_stored_oauth_connection_uses_workspace_oauth_token() -> None:
+    """Fast-follow to #101 Task 4: a workspace with a stored Jira OAuth Connection
+    row publishes using resolve_jira_connection's OAuth path (not the env-configured
+    CloudTokenConnection) — proven by the fake create() callback receiving a
+    JiraOAuthConnection instance built from the stored, decrypted tokens."""
+    ids = asyncio.run(_fixture())
+    asyncio.run(_add_oauth_connection(ids["workspace_id"]))
+
+    fake = _FakeJira()
+    seen_connections: list[object] = []
+    original_gateway = fake.gateway
+
+    def gateway_with_connection_capture() -> PublishGateway:
+        gw = original_gateway()
+
+        async def capturing_create(conn: object, *args: object, **kwargs: object) -> PublishOutcome:
+            seen_connections.append(conn)
+            return await gw.create(conn, *args, **kwargs)  # type: ignore[misc]
+
+        # Use the real connection resolver (not the fake's) so this test proves
+        # resolve_jira_connection's OAuth path actually gets wired through.
+        from app.routers.publish import _resolve_connection
+
+        return PublishGateway(
+            connection=_resolve_connection,
+            projects=gw.projects,
+            meta=gw.meta,
+            create=capturing_create,
+            update=gw.update,
+            health=gw.health,
+        )
+
+    app.dependency_overrides[get_publish_gateway] = gateway_with_connection_capture
+    client = TestClient(app)
+    try:
+        with patch.object(settings, "connector_dek_b64", _TEST_DEK_B64):
+            _setup_mapping(client, ids["project_id"])
+            _dispose()
+            response = client.post(
+                f"/projects/{ids['project_id']}/publish/jira", json={"item_ids": [ids["epic_id"]]}
+            )
+    finally:
+        app.dependency_overrides.pop(get_publish_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    assert response.json()["succeeded"] == 1
+    assert len(seen_connections) == 1
+    connection = seen_connections[0]
+    assert isinstance(connection, JiraOAuthConnection)
+    assert connection.access_token == "oauth-access-token"
+    assert connection.cloud_id == "cloud-id-abc"
+
+    asyncio.run(_cleanup_connection(ids["workspace_id"]))
+    asyncio.run(_cleanup(ids))
+
+
+def test_publish_with_no_connection_row_keeps_env_configured_fallback() -> None:
+    """Critical regression guard (fast-follow to #101 Task 4): every existing
+    production Jira-publishing workspace has no Connection row today. Confirms
+    resolve_jira_connection's env-configured fallback (CloudTokenConnection) is
+    still what gets used when no OAuth Connection row exists — the pre-existing
+    single-tenant publish path must be completely unaffected."""
+    ids = asyncio.run(_fixture())
+    # Deliberately no Connection row added for this workspace.
+
+    fake = _FakeJira()
+    seen_connections: list[object] = []
+    original_gateway = fake.gateway
+
+    def gateway_with_connection_capture() -> PublishGateway:
+        gw = original_gateway()
+
+        async def capturing_create(conn: object, *args: object, **kwargs: object) -> PublishOutcome:
+            seen_connections.append(conn)
+            return await gw.create(conn, *args, **kwargs)  # type: ignore[misc]
+
+        from app.routers.publish import _resolve_connection
+
+        return PublishGateway(
+            connection=_resolve_connection,
+            projects=gw.projects,
+            meta=gw.meta,
+            create=capturing_create,
+            update=gw.update,
+            health=gw.health,
+        )
+
+    app.dependency_overrides[get_publish_gateway] = gateway_with_connection_capture
+    client = TestClient(app)
+    try:
+        with (
+            patch.object(settings, "jira_base_url", "https://example.atlassian.net"),
+            patch.object(settings, "atlassian_email", "bot@example.com"),
+            patch.object(settings, "atlassian_api_token", "env-token"),
+        ):
+            _setup_mapping(client, ids["project_id"])
+            _dispose()
+            response = client.post(
+                f"/projects/{ids['project_id']}/publish/jira", json={"item_ids": [ids["epic_id"]]}
+            )
+    finally:
+        app.dependency_overrides.pop(get_publish_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    assert response.json()["succeeded"] == 1
+    assert len(seen_connections) == 1
+    connection = seen_connections[0]
+    assert isinstance(connection, CloudTokenConnection)
+    assert connection.url == "https://example.atlassian.net"
+
+    asyncio.run(_cleanup(ids))

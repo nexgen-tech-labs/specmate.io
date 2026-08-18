@@ -335,15 +335,15 @@ async def test_connection(
 
 
 async def _resolve_connection(session: AsyncSession, tool_key: str, workspace_id: str) -> object:
-    """Per-workspace connection resolution (Issue #101). GitHub prefers a stored
-    OAuth Connection for this workspace, falling back to the env-configured
-    connection. Jira/ADO have no per-workspace Connection support in this issue
-    (see design doc) — they stay on the existing single-tenant env-configured
-    resolvers unchanged."""
+    """Per-workspace connection resolution (Issue #101; Jira fast-follow to #101).
+    GitHub and Jira prefer a stored OAuth Connection for this workspace, falling
+    back to the env-configured connection. ADO has no per-workspace Connection
+    support yet (see design doc) — it stays on the existing single-tenant
+    env-configured resolver unchanged."""
     if tool_key == "jira":
-        from app.services.connectors.jira_auth import get_jira_connection
+        from app.services.connectors.jira_auth import resolve_jira_connection
 
-        return get_jira_connection()
+        return await resolve_jira_connection(session, workspace_id)
     if tool_key == "ado":
         from app.services.connectors.ado_auth import get_ado_connection
 

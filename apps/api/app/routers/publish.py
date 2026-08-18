@@ -31,7 +31,7 @@ from app.services.billing.metering import report_workspace_current_usage
 from app.services.connectors.jira_auth import (
     JiraConnection,
     check_connection_health,
-    get_jira_connection,
+    resolve_jira_connection,
 )
 from app.services.connectors.jira_publish import (
     PublishCandidate,
@@ -67,9 +67,13 @@ _DEFAULT_TYPE_SUGGESTIONS: dict[str, list[str]] = {
 }
 
 
+async def _resolve_connection(session: AsyncSession, workspace_id: str) -> JiraConnection:
+    return await resolve_jira_connection(session, workspace_id)
+
+
 @dataclass
 class PublishGateway:
-    connection: Callable[[], JiraConnection] = get_jira_connection
+    connection: Callable[[AsyncSession, str], Awaitable[JiraConnection]] = _resolve_connection
     projects: Callable[[JiraConnection], Awaitable[list[dict[str, str]]]] = discover_projects
     meta: Callable[[JiraConnection, str], Awaitable[dict[str, object]]] = discover_project_meta
     create: Callable[..., Awaitable[PublishOutcome]] = create_issue
@@ -91,10 +95,12 @@ def _now() -> datetime:
 
 @router.get("/connectors/jira/health")
 async def jira_health(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     gateway: Annotated[PublishGateway, Depends(get_publish_gateway)],
+    workspace_id: str | None = None,
 ) -> dict[str, object]:
     try:
-        connection = gateway.connection()
+        connection = await gateway.connection(session, workspace_id or "")
     except ConnectorError as exc:
         return {"ok": False, "reason": str(exc)}
     return await gateway.health(connection)
@@ -102,10 +108,13 @@ async def jira_health(
 
 @router.get("/connectors/jira/projects")
 async def jira_projects(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     gateway: Annotated[PublishGateway, Depends(get_publish_gateway)],
+    workspace_id: str | None = None,
 ) -> list[dict[str, str]]:
     try:
-        return await gateway.projects(gateway.connection())
+        connection = await gateway.connection(session, workspace_id or "")
+        return await gateway.projects(connection)
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -125,10 +134,12 @@ async def upsert_mapping(
 ) -> dict[str, object]:
     """Creates/refreshes the mapping, re-running discovery so the metadata snapshot
     (and default type suggestions) reflect the project's current Jira config."""
-    if await session.get(Project, project_id) is None:
+    project = await session.get(Project, project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
     try:
-        metadata = await gateway.meta(gateway.connection(), body.remote_project)
+        connection = await gateway.connection(session, project.workspaceId)
+        metadata = await gateway.meta(connection, body.remote_project)
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -345,7 +356,7 @@ async def publish_to_jira(
     connection = None
     if candidates:
         try:
-            connection = gateway.connection()
+            connection = await gateway.connection(session, workspace.id)
         except ConnectorError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

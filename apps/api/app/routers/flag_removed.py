@@ -22,7 +22,7 @@ from app.services.connectors.ado_auth import get_ado_connection
 from app.services.connectors.ado_publish import add_comment as ado_add_comment
 from app.services.connectors.github_auth import get_github_connection
 from app.services.connectors.github_publish import add_comment as github_add_comment
-from app.services.connectors.jira_auth import get_jira_connection
+from app.services.connectors.jira_auth import resolve_jira_connection
 from app.services.connectors.jira_publish import add_comment as jira_add_comment
 from app.services.connectors.types import ConnectorError
 
@@ -88,9 +88,13 @@ async def flag_removed(
     if mapping is None:
         raise HTTPException(status_code=400, detail="No publish mapping configured for this tool.")
 
+    project = await session.get(Project, item.projectId)
+    assert project is not None
+
     try:
         if published.targetTool == PublishTarget.JIRA:
-            await jira_add_comment(get_jira_connection(), published.externalKey, _REMOVED_COMMENT)
+            jira_connection = await resolve_jira_connection(session, project.workspaceId)
+            await jira_add_comment(jira_connection, published.externalKey, _REMOVED_COMMENT)
         elif published.targetTool == PublishTarget.ADO:
             work_item_id = int(published.externalKey.removeprefix("AB#"))
             await ado_add_comment(
@@ -106,8 +110,6 @@ async def flag_removed(
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    project = await session.get(Project, item.projectId)
-    assert project is not None
     flags = dict(item.flags or {})
     flags["sourceRemovedFlaggedExternally"] = True
     item.flags = flags

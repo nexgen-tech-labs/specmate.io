@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -91,11 +92,10 @@ def test_flag_removed_posts_a_comment_and_marks_flagged_externally(monkeypatch: 
     async def fake_add_comment(_conn: object, issue_key: str, text: str) -> None:
         posted.append((issue_key, text))
 
-    monkeypatch.setattr(
-        "app.services.connectors.jira_auth.get_jira_connection",
-        lambda: CloudTokenConnection("e", "t", "https://x"),
-    )
-    monkeypatch.setattr("app.routers.flag_removed.get_jira_connection", lambda: CloudTokenConnection("e", "t", "https://x"))
+    async def fake_resolve(_session: object, _workspace_id: str) -> CloudTokenConnection:
+        return CloudTokenConnection("e", "t", "https://x")
+
+    monkeypatch.setattr("app.routers.flag_removed.resolve_jira_connection", fake_resolve)
     monkeypatch.setattr("app.routers.flag_removed.jira_add_comment", fake_add_comment)
 
     client = TestClient(app)
@@ -160,5 +160,43 @@ def test_flag_removed_404s_when_item_was_never_published() -> None:
         _dispose()
 
     assert response.status_code == 404
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_flag_removed_resolves_connection_via_resolve_jira_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fast-follow to #101 Task 4: flag-removed must resolve the Jira connection
+    per-workspace via resolve_jira_connection (which transparently prefers a
+    stored OAuth Connection row), not the old single-tenant get_jira_connection
+    called directly — verified by mocking resolve_jira_connection and asserting
+    it was invoked with this item's project's actual workspace_id."""
+    ids = asyncio.run(_fixture())
+
+    fake_resolve = AsyncMock(return_value=CloudTokenConnection("e", "t", "https://x"))
+
+    posted: list[tuple[str, str]] = []
+
+    async def fake_add_comment(_conn: object, issue_key: str, text: str) -> None:
+        posted.append((issue_key, text))
+
+    monkeypatch.setattr("app.routers.flag_removed.resolve_jira_connection", fake_resolve)
+    monkeypatch.setattr("app.routers.flag_removed.jira_add_comment", fake_add_comment)
+
+    client = TestClient(app)
+    try:
+        response = client.post(
+            f"/draft-items/{ids['item_id']}/flag-removed",
+            json={"workspace_id": ids["workspace_id"]},
+        )
+    finally:
+        _dispose()
+
+    assert response.status_code == 200
+    fake_resolve.assert_awaited_once()
+    call_args = fake_resolve.await_args
+    assert call_args is not None
+    assert call_args.args[1] == ids["workspace_id"]
 
     asyncio.run(_cleanup(ids))

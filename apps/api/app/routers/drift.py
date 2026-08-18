@@ -20,7 +20,7 @@ from app.services.connectors.ado_auth import get_ado_connection
 from app.services.connectors.ado_publish import fetch_work_item
 from app.services.connectors.github_auth import get_github_connection
 from app.services.connectors.github_publish import fetch_issue as github_fetch_issue
-from app.services.connectors.jira_auth import get_jira_connection
+from app.services.connectors.jira_auth import resolve_jira_connection
 from app.services.connectors.jira_publish import fetch_issue as jira_fetch_issue
 from app.services.connectors.types import ConnectorError
 
@@ -69,7 +69,8 @@ async def check_drift(
     project_id: str,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> DriftCheckResponse:
-    if await session.get(Project, project_id) is None:
+    project = await session.get(Project, project_id)
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found.")
 
     published_result = await session.execute(
@@ -85,7 +86,8 @@ async def check_drift(
     for published in published_items:
         try:
             if published.targetTool == PublishTarget.JIRA:
-                remote = await jira_fetch_issue(get_jira_connection(), published.externalKey)
+                jira_connection = await resolve_jira_connection(session, project.workspaceId)
+                remote = await jira_fetch_issue(jira_connection, published.externalKey)
                 remote_title, remote_description = remote.title, remote.description
             elif published.targetTool == PublishTarget.ADO:
                 work_item_id = int(published.externalKey.removeprefix("AB#"))

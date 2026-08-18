@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -85,9 +86,10 @@ def test_drift_check_flags_a_changed_title(monkeypatch: pytest.MonkeyPatch) -> N
     async def fake_fetch(_conn: object, _key: str) -> RemoteIssueState:
         return RemoteIssueState(key="KAN-101", title="Manually renamed in Jira", description="d", status="To Do")
 
-    monkeypatch.setattr(
-        "app.routers.drift.get_jira_connection", lambda: CloudTokenConnection("e", "t", "https://x")
-    )
+    async def fake_resolve(_session: object, _workspace_id: str) -> CloudTokenConnection:
+        return CloudTokenConnection("e", "t", "https://x")
+
+    monkeypatch.setattr("app.routers.drift.resolve_jira_connection", fake_resolve)
     monkeypatch.setattr("app.routers.drift.jira_fetch_issue", fake_fetch)
 
     client = TestClient(app)
@@ -132,9 +134,10 @@ def test_drift_check_reports_clean_when_nothing_changed(monkeypatch: pytest.Monk
     async def fake_fetch(_conn: object, _key: str) -> RemoteIssueState:
         return RemoteIssueState(key="KAN-101", title="Saved card story", description="d", status="To Do")
 
-    monkeypatch.setattr(
-        "app.routers.drift.get_jira_connection", lambda: CloudTokenConnection("e", "t", "https://x")
-    )
+    async def fake_resolve(_session: object, _workspace_id: str) -> CloudTokenConnection:
+        return CloudTokenConnection("e", "t", "https://x")
+
+    monkeypatch.setattr("app.routers.drift.resolve_jira_connection", fake_resolve)
     monkeypatch.setattr("app.routers.drift.jira_fetch_issue", fake_fetch)
 
     client = TestClient(app)
@@ -157,9 +160,10 @@ def test_repeated_drift_check_does_not_duplicate_open_flags(monkeypatch: pytest.
     async def fake_fetch(_conn: object, _key: str) -> RemoteIssueState:
         return RemoteIssueState(key="KAN-101", title="Renamed again", description="d", status="To Do")
 
-    monkeypatch.setattr(
-        "app.routers.drift.get_jira_connection", lambda: CloudTokenConnection("e", "t", "https://x")
-    )
+    async def fake_resolve(_session: object, _workspace_id: str) -> CloudTokenConnection:
+        return CloudTokenConnection("e", "t", "https://x")
+
+    monkeypatch.setattr("app.routers.drift.resolve_jira_connection", fake_resolve)
     monkeypatch.setattr("app.routers.drift.jira_fetch_issue", fake_fetch)
 
     client = TestClient(app)
@@ -198,9 +202,10 @@ def test_resolve_drift_accept_external_updates_baseline(monkeypatch: pytest.Monk
     async def fake_fetch(_conn: object, _key: str) -> RemoteIssueState:
         return RemoteIssueState(key="KAN-101", title="Renamed externally", description="d", status="To Do")
 
-    monkeypatch.setattr(
-        "app.routers.drift.get_jira_connection", lambda: CloudTokenConnection("e", "t", "https://x")
-    )
+    async def fake_resolve(_session: object, _workspace_id: str) -> CloudTokenConnection:
+        return CloudTokenConnection("e", "t", "https://x")
+
+    monkeypatch.setattr("app.routers.drift.resolve_jira_connection", fake_resolve)
     monkeypatch.setattr("app.routers.drift.jira_fetch_issue", fake_fetch)
 
     client = TestClient(app)
@@ -264,3 +269,36 @@ def test_resolve_drift_accept_external_updates_baseline(monkeypatch: pytest.Monk
 
     asyncio.run(_cleanup(ids))
     assert check.status_code == 200
+
+
+def test_drift_check_resolves_connection_via_resolve_jira_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fast-follow to #101 Task 4: drift-check must resolve the Jira connection
+    per-workspace via resolve_jira_connection (which transparently prefers a
+    stored OAuth Connection row), not the old single-tenant get_jira_connection
+    called directly — verified by mocking resolve_jira_connection and asserting
+    it was invoked with this project's actual workspace_id."""
+    ids = asyncio.run(_fixture({"title": "Saved card story", "description": "d"}))
+
+    fake_resolve = AsyncMock(return_value=CloudTokenConnection("e", "t", "https://x"))
+
+    async def fake_fetch(_conn: object, _key: str) -> RemoteIssueState:
+        return RemoteIssueState(key="KAN-101", title="Saved card story", description="d", status="To Do")
+
+    monkeypatch.setattr("app.routers.drift.resolve_jira_connection", fake_resolve)
+    monkeypatch.setattr("app.routers.drift.jira_fetch_issue", fake_fetch)
+
+    client = TestClient(app)
+    try:
+        response = client.post(f"/projects/{ids['project_id']}/drift-check")
+    finally:
+        _dispose()
+
+    assert response.status_code == 200
+    fake_resolve.assert_awaited_once()
+    call_args = fake_resolve.await_args
+    assert call_args is not None
+    assert call_args.args[1] == ids["workspace_id"]
+
+    asyncio.run(_cleanup(ids))
