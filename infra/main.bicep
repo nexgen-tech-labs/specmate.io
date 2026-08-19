@@ -20,6 +20,24 @@ param postgresAdminLogin string
 @description('Postgres administrator password — pass via --parameters at deploy time, never commit')
 param postgresAdminPassword string
 
+@description('''
+Custom domain for the web app (e.g. specmate.io). Leave empty on first deploy —
+Azure requires the domain to be DNS-verified (TXT record for
+customDomainVerificationId, then CNAME to the default *.azurecontainerapps.io
+FQDN) *before* a Managed Certificate can be issued and bound, so this is a
+two-phase rollout: deploy once with this empty to create the app and get its
+customDomainVerificationId output, add the DNS records at the registrar, wait
+for propagation, then redeploy with this parameter set. See infra/README.md.
+
+apiApp has no equivalent parameter: its ingress is internal-only (no VNet /
+private DNS zone is provisioned for this environment), so Azure custom-domain
+binding + managed certificates don't apply to it — WEB_BASE_URL always points
+at its real internal *.azurecontainerapps.io FQDN. A CNAME for api.<domain> is
+still documented in infra/README.md as an optional, purely cosmetic DNS entry
+(nothing ever resolves or routes through it).
+''')
+param webCustomDomain string = ''
+
 var suffix = environmentName == 'production' ? '' : '-${environmentName}'
 var resourceName = '${namePrefix}${suffix}'
 
@@ -160,11 +178,40 @@ var apiSecretEnvVars = [
     secretRef: s.secretRef
   }
 ]
+// Effective public web hostname: the custom domain once bound (phase 2), else
+// the default *.azurecontainerapps.io FQDN (phase 1 / before DNS is set up).
+// apiApp has no such switch — it's always the real internal FQDN (see
+// webCustomDomain's description above for why).
+var webPublicUrl = empty(webCustomDomain)
+  ? 'https://${resourceName}-web.${containerAppsEnv.properties.defaultDomain}'
+  : 'https://${webCustomDomain}'
+var apiInternalUrl = 'https://${resourceName}-api.internal.${containerAppsEnv.properties.defaultDomain}'
+
 var apiStaticEnvVars = [
   { name: 'ENVIRONMENT', value: environmentName }
   { name: 'AZURE_STORAGE_CONTAINER', value: 'sources' }
   { name: 'STRIPE_USAGE_EVENT_NAME', value: 'published_item' }
+  // Closes a pre-existing gap: apps/api's Settings.web_base_url (used to build
+  // OAuth-callback redirect targets back into the wizard UI) had no Bicep env
+  // var wiring at all before this, so it silently fell back to its
+  // http://localhost:3000 default in every real deployment.
+  { name: 'WEB_BASE_URL', value: webPublicUrl }
 ]
+
+// Phase 2 only: Azure requires webCustomDomain to already be DNS-verified
+// (TXT record matching containerAppsEnv's customDomainVerificationId, plus a
+// CNAME pointing at the default FQDN below) before this resource can be
+// created — see infra/README.md for the exact records and the two-phase
+// deploy sequence.
+resource webCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = if (!empty(webCustomDomain)) {
+  parent: containerAppsEnv
+  name: '${resourceName}-web-cert'
+  location: location
+  properties: {
+    subjectName: webCustomDomain
+    domainControlValidation: 'CNAME'
+  }
+}
 
 resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${resourceName}-web'
@@ -181,6 +228,20 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
       ingress: {
         external: true
         targetPort: 3000
+        // Phase 1 (webCustomDomain empty): no custom domain bound yet — app is
+        // reachable only at its default *.azurecontainerapps.io FQDN, which is
+        // also where customDomainVerificationId (see output below) comes from
+        // for the DNS TXT record. Phase 2 (webCustomDomain set, after DNS has
+        // propagated): binds the domain using the Managed Certificate below.
+        customDomains: empty(webCustomDomain)
+          ? []
+          : [
+              {
+                name: webCustomDomain
+                certificateId: webCertificate.id
+                bindingType: 'SniEnabled'
+              }
+            ]
       }
       registries: [
         {
@@ -204,8 +265,8 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
           resources: { cpu: json('0.5'), memory: '1Gi' }
           env: concat(
             [
-              { name: 'NEXTAUTH_URL', value: 'https://${resourceName}-web.${containerAppsEnv.properties.defaultDomain}' }
-              { name: 'API_BASE_URL', value: 'https://${resourceName}-api.internal.${containerAppsEnv.properties.defaultDomain}' }
+              { name: 'NEXTAUTH_URL', value: webPublicUrl }
+              { name: 'API_BASE_URL', value: apiInternalUrl }
             ],
             webStaticEnvVars,
             webSecretEnvVars
@@ -265,4 +326,8 @@ output acrLoginServer string = acr.properties.loginServer
 output postgresFqdn string = postgres.properties.fullyQualifiedDomainName
 output containerAppIdentityId string = containerAppIdentity.id
 output webAppFqdn string = webApp.properties.configuration.ingress.fqdn
+output apiAppFqdn string = apiApp.properties.configuration.ingress.fqdn
 output storageAccountName string = storageAccount.name
+// Phase 1: value for the DNS TXT record (asuid.<webCustomDomain>) required
+// before webCustomDomain can be set on a phase-2 redeploy. See infra/README.md.
+output webCustomDomainVerificationId string = webApp.properties.customDomainVerificationId
