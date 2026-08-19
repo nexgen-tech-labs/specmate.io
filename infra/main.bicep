@@ -198,20 +198,26 @@ var apiStaticEnvVars = [
   { name: 'WEB_BASE_URL', value: webPublicUrl }
 ]
 
-// Phase 2 only: Azure requires webCustomDomain to already be DNS-verified
-// (TXT record matching containerAppsEnv's customDomainVerificationId, plus a
-// CNAME pointing at the default FQDN below) before this resource can be
-// created — see infra/README.md for the exact records and the two-phase
-// deploy sequence.
-resource webCertificate 'Microsoft.App/managedEnvironments/managedCertificates@2024-03-01' = if (!empty(webCustomDomain)) {
-  parent: containerAppsEnv
-  name: '${resourceName}-web-cert'
-  location: location
-  properties: {
-    subjectName: webCustomDomain
-    domainControlValidation: 'CNAME'
-  }
-}
+// Custom domain binding is NOT modeled as a Bicep resource here, despite an
+// earlier attempt to do so. Azure requires a strict imperative order this
+// declarative template can't express cleanly:
+//   1. az containerapp hostname add (adds the hostname UNBOUND — Azure
+//      rejects `managedCertificates` creation with RequireCustomHostnameInEnvironment
+//      if the hostname isn't already added to an app first)
+//   2. az containerapp env certificate create (issues the Managed
+//      Certificate — Azure auto-generates its resource name, e.g.
+//      mc-<rg>-<domain-with-dashes>-<random suffix>; NOT a name this
+//      template can predict, so a Bicep resource block for it would create
+//      a *second*, duplicate certificate and fail with
+//      DuplicateManagedCertificateInEnvironment on any redeploy)
+//   3. az containerapp hostname bind (binds the cert from step 2 to the
+//      hostname from step 1)
+// webCustomDomain's only remaining job in this template is to switch
+// NEXTAUTH_URL/WEB_BASE_URL to the real domain once you've done the 3 steps
+// above manually — see infra/README.md for the exact commands. Re-running
+// this deployment after that is safe (idempotent) as long as webCustomDomain
+// matches what you actually bound; it does NOT create or touch the
+// certificate/binding itself.
 
 resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: '${resourceName}-web'
@@ -228,20 +234,12 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
       ingress: {
         external: true
         targetPort: 3000
-        // Phase 1 (webCustomDomain empty): no custom domain bound yet — app is
-        // reachable only at its default *.azurecontainerapps.io FQDN, which is
-        // also where customDomainVerificationId (see output below) comes from
-        // for the DNS TXT record. Phase 2 (webCustomDomain set, after DNS has
-        // propagated): binds the domain using the Managed Certificate below.
-        customDomains: empty(webCustomDomain)
-          ? []
-          : [
-              {
-                name: webCustomDomain
-                certificateId: webCertificate.id
-                bindingType: 'SniEnabled'
-              }
-            ]
+        // Deliberately NOT managing customDomains here — see the comment
+        // above this resource for why (Azure's imperative ordering
+        // requirement for hostname-add / cert-create / cert-bind doesn't fit
+        // this template's declarative model). The binding is applied via the
+        // CLI steps in infra/README.md and left alone by subsequent
+        // redeploys of this template.
       }
       registries: [
         {
