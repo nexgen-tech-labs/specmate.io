@@ -21,22 +21,28 @@ param postgresAdminLogin string
 param postgresAdminPassword string
 
 @description('''
-Custom domain for the web app (e.g. specmate.io). Leave empty on first deploy —
-Azure requires the domain to be DNS-verified (TXT record for
+Custom domain for the web app (e.g. www.specmate.io). Leave empty on first
+deploy — Azure requires the domain to be DNS-verified (TXT record for
 customDomainVerificationId, then CNAME to the default *.azurecontainerapps.io
-FQDN) *before* a Managed Certificate can be issued and bound, so this is a
-two-phase rollout: deploy once with this empty to create the app and get its
-customDomainVerificationId output, add the DNS records at the registrar, wait
-for propagation, then redeploy with this parameter set. See infra/README.md.
-
-apiApp has no equivalent parameter: its ingress is internal-only (no VNet /
-private DNS zone is provisioned for this environment), so Azure custom-domain
-binding + managed certificates don't apply to it — WEB_BASE_URL always points
-at its real internal *.azurecontainerapps.io FQDN. A CNAME for api.<domain> is
-still documented in infra/README.md as an optional, purely cosmetic DNS entry
-(nothing ever resolves or routes through it).
+FQDN) *before* a Managed Certificate can be issued and bound, and Azure also
+requires the hostname to exist as an unbound custom domain before the
+certificate can be created against it — so this parameter only drives the
+webPublicUrl env-var wiring (NEXTAUTH_URL/WEB_BASE_URL); the actual hostname
+add / certificate issue / certificate bind sequence is run manually via the
+CLI (not modeled as a Bicep resource — see infra/README.md for why and for
+the exact commands actually run for both webApp and apiApp).
 ''')
 param webCustomDomain string = ''
+
+@description('''
+Custom domain for the api app (e.g. api.specmate.io). apiApp's ingress is
+external (flipped from internal-only — see infra/README.md for why: Atlassian
+and GitHub's connector OAuth apps call this API's /oauth/callback endpoint
+directly server-to-server, which requires a public URL). Same manual
+hostname-add/cert-issue/cert-bind sequence as webCustomDomain; this parameter
+only drives apiExternalUrl (API_BASE_URL_EXTERNAL).
+''')
+param apiCustomDomain string = ''
 
 var suffix = environmentName == 'production' ? '' : '-${environmentName}'
 var resourceName = '${namePrefix}${suffix}'
@@ -178,14 +184,19 @@ var apiSecretEnvVars = [
     secretRef: s.secretRef
   }
 ]
-// Effective public web hostname: the custom domain once bound (phase 2), else
-// the default *.azurecontainerapps.io FQDN (phase 1 / before DNS is set up).
-// apiApp has no such switch — it's always the real internal FQDN (see
-// webCustomDomain's description above for why).
+// Effective public hostnames: the custom domain once bound, else the default
+// *.azurecontainerapps.io FQDN. apiApp's ingress is external (not internal —
+// see apiCustomDomain's description above), so apps/web's server-to-server
+// calls to it now use the same FQDN a browser would reach it at; there is no
+// separate "internal" hostname anymore (Container Apps environments don't
+// expose a distinct internal-only FQDN once ingress is external — the plain
+// FQDN is reachable both from other apps in the environment and publicly).
 var webPublicUrl = empty(webCustomDomain)
   ? 'https://${resourceName}-web.${containerAppsEnv.properties.defaultDomain}'
   : 'https://${webCustomDomain}'
-var apiInternalUrl = 'https://${resourceName}-api.internal.${containerAppsEnv.properties.defaultDomain}'
+var apiPublicUrl = empty(apiCustomDomain)
+  ? 'https://${resourceName}-api.${containerAppsEnv.properties.defaultDomain}'
+  : 'https://${apiCustomDomain}'
 
 var apiStaticEnvVars = [
   { name: 'ENVIRONMENT', value: environmentName }
@@ -196,6 +207,10 @@ var apiStaticEnvVars = [
   // var wiring at all before this, so it silently fell back to its
   // http://localhost:3000 default in every real deployment.
   { name: 'WEB_BASE_URL', value: webPublicUrl }
+  // Atlassian (and the GitHub connector OAuth app) call this API's
+  // /connectors/{tool}/oauth/callback endpoint directly, server-to-server —
+  // needs apiApp's real externally-reachable URL, not apps/web's.
+  { name: 'API_BASE_URL_EXTERNAL', value: apiPublicUrl }
 ]
 
 // Custom domain binding is NOT modeled as a Bicep resource here, despite an
@@ -264,7 +279,7 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
           env: concat(
             [
               { name: 'NEXTAUTH_URL', value: webPublicUrl }
-              { name: 'API_BASE_URL', value: apiInternalUrl }
+              { name: 'API_BASE_URL', value: apiPublicUrl }
             ],
             webStaticEnvVars,
             webSecretEnvVars
@@ -289,7 +304,12 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: containerAppsEnv.id
     configuration: {
       ingress: {
-        external: false
+        // Flipped from internal-only: Atlassian's and GitHub's connector
+        // OAuth apps call this API's /oauth/callback endpoint directly,
+        // server-to-server, which requires a public URL — see
+        // infra/README.md's "Custom domain" section for the incident this
+        // was found from and apiCustomDomain's description above.
+        external: true
         targetPort: 8000
       }
       registries: [

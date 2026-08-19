@@ -22,55 +22,60 @@ az deployment group create \
 
 If Postgres Flexible Server provisioning fails with `LocationIsOfferRestricted`, check `az postgres flexible-server list-skus --location <region>` for alternate regions the subscription actually allows before retrying.
 
-## Custom domain (www.specmate.io) — LIVE
+## Custom domains (www.specmate.io + api.specmate.io) — LIVE
 
-`https://www.specmate.io` is bound and serving production traffic (verified: valid DigiCert-issued cert via `curl -v`, `NEXTAUTH_URL`/`WEB_BASE_URL` both set). Bound to `www`, not the bare `specmate.io` apex — Hostinger had a pre-existing A record (their default parking page) at the apex, which conflicts with the ALIAS/CNAME-flattening record Azure's custom domain needs there (`RRset specmate.io IN ALIAS must not be used with A on the same name`). Rather than delete Hostinger's apex record, `www` was used instead — simpler, no apex-record surgery required. The apex (`specmate.io`) currently still serves Hostinger's own page; if you want it to redirect to `www.specmate.io`, set that up as a domain forward in Hostinger's panel (unrelated to anything in this repo).
+`https://www.specmate.io` and `https://api.specmate.io` are both bound and serving production traffic (verified: valid DigiCert-issued certs via `curl -v`, all four of `NEXTAUTH_URL`/`WEB_BASE_URL`/`API_BASE_URL`/`API_BASE_URL_EXTERNAL` set). `www`, not the bare `specmate.io` apex — Hostinger had a pre-existing A record (their default parking page) at the apex, which conflicts with the ALIAS/CNAME-flattening record Azure's custom domain needs there (`RRset specmate.io IN ALIAS must not be used with A on the same name`). Rather than delete Hostinger's apex record, `www` was used instead — simpler, no apex-record surgery required. The apex (`specmate.io`) intentionally still serves Hostinger's own page (confirmed acceptable, not redirected).
 
-`specmate-api` has no custom domain: its ingress is internal-only (no VNet/private DNS zone provisioned for this environment), so Azure custom-domain binding doesn't apply there. `WEB_BASE_URL`/`API_BASE_URL_EXTERNAL`-style config always uses the real internal `*.azurecontainerapps.io` FQDN.
+`specmate-api`'s ingress was **flipped from internal-only to external** (`infra/main.bicep`'s `apiApp.properties.configuration.ingress.external`) specifically so Atlassian's and GitHub's connector OAuth apps can call `/connectors/{tool}/oauth/callback` directly, server-to-server — these providers call the callback URL themselves; it can't be proxied through `apps/web` the way `/oauth/start` is (`apps/web/src/lib/oauth-start-proxy.ts`), since that would require inventing a stateful callback-forwarding mechanism instead of a simple redirect. `apps/web`'s own server-to-server calls to `apps/api` still use the internal Container Apps FQDN (not the public `api.specmate.io` domain) — no reason to route that traffic over the public internet just because the ingress _can_ now accept it, and the browser is still never handed `apps/api`'s URL directly regardless of ingress reachability.
 
 ### How it was actually done (imperative CLI, not a single Bicep deploy)
 
-Azure's custom-domain + Managed Certificate flow has a strict order that doesn't fit Bicep's declarative model cleanly (a Bicep `managedCertificates` resource attempt was tried first and reverted — see git history — after hitting `RequireCustomHostnameInEnvironment` on first apply, since the hostname has to already exist as an _unbound_ custom domain before a certificate can be created against it, and Azure auto-generates the certificate's resource name so a template can't predict it for reuse on redeploy without risking `DuplicateManagedCertificateInEnvironment`):
+Azure's custom-domain + Managed Certificate flow has a strict order that doesn't fit Bicep's declarative model cleanly (a Bicep `managedCertificates` resource attempt was tried first and reverted — see git history — after hitting `RequireCustomHostnameInEnvironment` on first apply, since the hostname has to already exist as an _unbound_ custom domain before a certificate can be created against it, and Azure auto-generates the certificate's resource name so a template can't predict it for reuse on redeploy without risking `DuplicateManagedCertificateInEnvironment`). The same 5-step sequence was run once for `specmate-web`/`www.specmate.io` and once for `specmate-api`/`api.specmate.io` (with an extra `az containerapp ingress update --type external` first for the api app, since its ingress started internal-only):
 
 ```bash
-# 1. DNS records at Hostinger (TXT verification + CNAME), added BEFORE any of the below:
-#    TXT   asuid.www.specmate.io  ->  <az containerapp show --query properties.customDomainVerificationId>
-#    CNAME www.specmate.io        ->  specmate-web.<containerAppsEnv defaultDomain>
-#    (verify with: dig TXT asuid.www.specmate.io  /  dig CNAME www.specmate.io — check against
-#     the zone's own authoritative nameserver, e.g. `dig @<ns> ...`, if a public resolver still
-#     shows a stale cached answer)
+# 0. (api app only) flip ingress external first
+az containerapp ingress update --name specmate-api --resource-group rg-specmate-prod --type external --target-port 8000
+
+# 1. DNS records at Hostinger (TXT verification + CNAME), added BEFORE any of the below.
+#    Substitute HOSTNAME for www.specmate.io or api.specmate.io as appropriate:
+#    TXT   asuid.<HOSTNAME>  ->  <az containerapp show --query properties.customDomainVerificationId>
+#      (same verification ID for both — it's per-environment, not per-app)
+#    CNAME <HOSTNAME>        ->  <the app's ingress fqdn — specmate-web.<defaultDomain> or specmate-api.<defaultDomain>>
+#    (verify with: dig TXT asuid.<HOSTNAME>  /  dig CNAME <HOSTNAME> — check against the zone's own
+#     authoritative nameserver, e.g. `dig @<ns> ...`, if a public resolver still shows a stale cached answer)
 
 # 2. Add the hostname, unbound
-az containerapp hostname add --name specmate-web --resource-group rg-specmate-prod --hostname www.specmate.io
+az containerapp hostname add --name <specmate-web|specmate-api> --resource-group rg-specmate-prod --hostname <HOSTNAME>
 
-# 3. Issue the Managed Certificate (Azure auto-names it, e.g. mc-<rg>-www-specmate-io-<random>)
+# 3. Issue the Managed Certificate (Azure auto-names it, e.g. mc-<rg>-<hostname-with-dashes>-<random>)
 az containerapp env certificate create --name specmate-env --resource-group rg-specmate-prod \
-  --hostname www.specmate.io --validation-method CNAME
+  --hostname <HOSTNAME> --validation-method CNAME
 # poll until Succeeded:
 az containerapp env certificate list --name specmate-env --resource-group rg-specmate-prod \
-  --managed-certificates-only --query "[?properties.subjectName=='www.specmate.io'].properties.provisioningState" -o tsv
+  --managed-certificates-only --query "[?properties.subjectName=='<HOSTNAME>'].properties.provisioningState" -o tsv
 
 # 4. Bind the issued cert to the hostname
 CERT_ID=$(az containerapp env certificate list --name specmate-env --resource-group rg-specmate-prod \
-  --managed-certificates-only --query "[?properties.subjectName=='www.specmate.io'].id" -o tsv)
-az containerapp hostname bind --name specmate-web --resource-group rg-specmate-prod \
-  --hostname www.specmate.io --certificate "$CERT_ID" --environment specmate-env
+  --managed-certificates-only --query "[?properties.subjectName=='<HOSTNAME>'].id" -o tsv)
+az containerapp hostname bind --name <specmate-web|specmate-api> --resource-group rg-specmate-prod \
+  --hostname <HOSTNAME> --certificate "$CERT_ID" --environment specmate-env
 
-# 5. Point NEXTAUTH_URL / WEB_BASE_URL at the real domain
+# 5. Point the relevant env vars at the real domain
 az containerapp update --name specmate-web --resource-group rg-specmate-prod \
-  --set-env-vars "NEXTAUTH_URL=https://www.specmate.io"
+  --set-env-vars "NEXTAUTH_URL=https://www.specmate.io" "API_BASE_URL=https://specmate-api.<defaultDomain>"
 az containerapp update --name specmate-api --resource-group rg-specmate-prod \
-  --set-env-vars "WEB_BASE_URL=https://www.specmate.io"
+  --set-env-vars "WEB_BASE_URL=https://www.specmate.io" "API_BASE_URL_EXTERNAL=https://api.specmate.io"
 ```
 
-`main.bicep`'s `webCustomDomain` parameter (when set to `www.specmate.io` on a redeploy) only drives step 5 (`webPublicUrl` → `NEXTAUTH_URL`/`WEB_BASE_URL`) — it deliberately does NOT create or touch the certificate/hostname binding, which stay owned by steps 2-4 above and are left alone by any Bicep redeploy. If the domain ever needs to move to a different app or be re-bound (e.g. cert renewal issues), redo steps 2-4 manually.
+`main.bicep`'s `webCustomDomain`/`apiCustomDomain` parameters (when set on a redeploy) only drive step 5's env-var wiring (`webPublicUrl`/`apiPublicUrl` → `NEXTAUTH_URL`/`WEB_BASE_URL`/`API_BASE_URL`/`API_BASE_URL_EXTERNAL`) — they deliberately do NOT create or touch the certificate/hostname binding, which stay owned by steps 2-4 above and are left alone by any Bicep redeploy. If a domain ever needs to move to a different app or be re-bound (e.g. cert renewal issues), redo steps 2-4 manually for that hostname.
 
-Verify: `curl -v https://www.specmate.io/ 2>&1 | grep -i "subject\|issuer"` should show a cert with `CN=www.specmate.io` issued by DigiCert, and `curl https://www.specmate.io/api/auth/providers` should show every OAuth provider's `signinUrl`/`callbackUrl` using `www.specmate.io`, not the old `*.azurecontainerapps.io` FQDN.
+Verify: `curl -v https://www.specmate.io/ 2>&1 | grep -i "subject\|issuer"` and the same for `https://api.specmate.io/health` should show certs with the matching `CN`, issued by DigiCert. `curl https://www.specmate.io/api/auth/providers` should show every OAuth provider's `signinUrl`/`callbackUrl` using `www.specmate.io`.
 
-### Existing GitHub/Atlassian OAuth App callback URLs
+### Existing GitHub/Atlassian OAuth App callback URLs — updated
 
-- **GitHub OAuth App** (Settings → Developer settings → OAuth Apps): Authorization callback URL → `https://www.specmate.io/api/auth/callback/github` (Auth.js login) and confirm the separate connector OAuth App (Issue #101, different registration) doesn't hardcode the old FQDN anywhere either.
-- **Atlassian OAuth App** (developer.atlassian.com/console/myapps): callback URL is `apps/api`'s `/connectors/jira/oauth/callback`, reachable via `API_BASE_URL_EXTERNAL` — this is a **separate, still-unresolved** question (see `apps/api/.env.example`'s `API_BASE_URL_EXTERNAL` comment) about whether `specmate-api`'s ingress needs to go external or the callback needs to route through `apps/web`'s proxy; the domain work here doesn't resolve it.
+- **GitHub OAuth App** (Settings → Developer settings → OAuth Apps, user sign-in): Authorization callback URL → `https://www.specmate.io/api/auth/callback/github`.
+- **GitHub connector OAuth App** (Issue #101, separate registration, "Connect with GitHub" in the wizard): Authorization callback URL → `https://api.specmate.io/connectors/github/oauth/callback`.
+- **Atlassian OAuth App** (developer.atlassian.com/console/myapps): callback URL → `https://api.specmate.io/connectors/jira/oauth/callback` (this is `API_BASE_URL_EXTERNAL` + the fixed callback path from `jira_oauth.py`).
 
 ## Federated credentials for GitHub Actions (OIDC, no client secret)
 
