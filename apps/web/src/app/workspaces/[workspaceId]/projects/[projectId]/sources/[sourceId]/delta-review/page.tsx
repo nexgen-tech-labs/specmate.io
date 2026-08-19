@@ -143,6 +143,11 @@ export default async function DeltaReviewPage({
             isAdmin={isAdmin}
             approvalStages={project.workspace.approvalStages}
             activeFilters={{}}
+            // This branch only renders when rows.length > 0 (see the guard
+            // above), so ReviewQueue's items.length === 0 empty-state logic
+            // never actually triggers here — these values are irrelevant.
+            totalItemCount={rows.length}
+            sourceCount={1}
           />
         )}
       </div>

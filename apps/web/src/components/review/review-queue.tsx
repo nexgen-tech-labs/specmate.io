@@ -71,6 +71,8 @@ export function ReviewQueue({
   isAdmin,
   approvalStages,
   activeFilters,
+  totalItemCount,
+  sourceCount,
 }: {
   workspaceId: string;
   projectId: string;
@@ -79,6 +81,8 @@ export function ReviewQueue({
   isAdmin: boolean;
   approvalStages: number;
   activeFilters: { type?: string; status?: string; flagged?: string; sort?: string };
+  totalItemCount: number;
+  sourceCount: number;
 }) {
   const router = useRouter();
   const base = `/api/workspaces/${workspaceId}/projects/${projectId}/draft-items`;
@@ -262,7 +266,28 @@ export function ReviewQueue({
       </div>
 
       {error ? <p className="mb-3 text-sm text-red">{error}</p> : null}
-      {items.length === 0 ? <p className="text-sm text-sub">No items match this filter.</p> : null}
+      {items.length === 0 ? (
+        totalItemCount === 0 ? (
+          <div className="rounded-md border border-line bg-panel px-4 py-6 text-sm">
+            <p className="font-semibold text-ink">
+              {sourceCount === 0 ? 'This project has no sources yet.' : 'No items generated yet.'}
+            </p>
+            <p className="mt-1 text-sub">
+              {sourceCount === 0
+                ? 'Upload a source document and run generation to see items here.'
+                : 'Sources are uploaded — run generation to produce items for review.'}
+            </p>
+            <Link
+              href={`/workspaces/${workspaceId}/projects/${projectId}/get-started`}
+              className="mt-3 inline-block rounded bg-cobalt px-3 py-1.5 text-xs font-semibold text-white"
+            >
+              Get started →
+            </Link>
+          </div>
+        ) : (
+          <p className="text-sm text-sub">No items match this filter.</p>
+        )
+      ) : null}
 
       <ul className="space-y-2" data-tour="review-item-list">
         {items.map((item) => {

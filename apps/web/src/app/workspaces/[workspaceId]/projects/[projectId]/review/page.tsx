@@ -23,6 +23,12 @@ export default async function ReviewPage({
   });
   if (!project) notFound();
 
+  // Distinguishes "this project has no generated items at all yet" (needs a
+  // source + a generation run) from "items exist but the current filter
+  // excludes all of them" — the two need different empty-state messaging.
+  const totalItemCount = await prisma.draftItem.count({ where: { projectId, deletedAt: null } });
+  const sourceCount = await prisma.source.count({ where: { projectId, deletedAt: null } });
+
   const items = await prisma.draftItem.findMany({
     where: {
       projectId,
@@ -132,6 +138,8 @@ export default async function ReviewPage({
           isAdmin={isAdmin}
           approvalStages={project.workspace.approvalStages}
           activeFilters={filters}
+          totalItemCount={totalItemCount}
+          sourceCount={sourceCount}
         />
       </div>
     </div>
