@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { NextResponse } from 'next/server';
 import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
@@ -5,6 +6,16 @@ import { prisma } from '@/lib/prisma';
 type Params = { params: Promise<{ accountId: string }> };
 
 class LastSignInMethodError extends Error {}
+
+// Postgres can abort a Serializable transaction with a serialization failure
+// (surfaced by Prisma as P2034) when it detects a conflict with a concurrent
+// transaction, even if that conflict wouldn't actually violate correctness —
+// this is expected under this isolation level and the documented way to
+// handle it is to retry. See the transaction below for why Serializable is
+// used here.
+function isSerializationFailure(err: unknown): boolean {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2034';
+}
 
 export async function DELETE(_request: Request, { params }: Params) {
   const session = await auth();
@@ -27,8 +38,8 @@ export async function DELETE(_request: Request, { params }: Params) {
   // concurrent DELETEs for a user's last two Accounts (no password) could
   // both read count=2, both pass the check, and both delete, leaving the
   // user locked out.
-  try {
-    await prisma.$transaction(
+  const runTransaction = () =>
+    prisma.$transaction(
       async (tx) => {
         const user = await tx.user.findUniqueOrThrow({
           where: { id: userId },
@@ -41,6 +52,21 @@ export async function DELETE(_request: Request, { params }: Params) {
       },
       { isolationLevel: 'Serializable' },
     );
+
+  try {
+    try {
+      await runTransaction();
+    } catch (err) {
+      // Postgres can abort either side of a Serializable conflict, not just
+      // the "loser" — a retry re-reads current state and reaches the correct
+      // outcome (delete, or LastSignInMethodError if the other transaction
+      // already won).
+      if (isSerializationFailure(err)) {
+        await runTransaction();
+      } else {
+        throw err;
+      }
+    }
   } catch (err) {
     if (err instanceof LastSignInMethodError) {
       return NextResponse.json(
