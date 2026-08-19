@@ -1,0 +1,39 @@
+import { NextResponse } from 'next/server';
+
+// apps/api isn't directly browser-reachable in this deployment (Azure
+// Container Apps — apps/web talks to it over API_BASE_URL, a
+// server-only/internal-networking URL never exposed to the browser; there is
+// no NEXT_PUBLIC_* equivalent anywhere in this codebase). A wizard "Connect
+// with X" button therefore can't navigate the browser straight to apps/api's
+// OAuth start endpoint, and apps/api's own /start handler responds with a
+// redirect (to github.com / auth.atlassian.com / etc), NOT the data needed
+// to build that URL client-side — so the browser can't be pointed at
+// apps/api's internal URL and just "follow the redirect" itself either; the
+// internal FQDN isn't resolvable outside Azure's network at all (confirmed
+// live — hitting it directly 404s in a browser).
+//
+// This helper calls apps/api's /start endpoint server-side instead (server-
+// to-server traffic over the internal URL works fine) with redirect: 'manual'
+// so fetch doesn't itself follow the 3xx, reads the real provider authorize
+// URL off the Location header apps/api returned, and redirects the browser
+// straight there. The internal apps/api URL is never exposed to or touched
+// by the browser at any point.
+export async function proxyOAuthStart(request: Request, toolKey: string): Promise<NextResponse> {
+  const wizardSessionId = new URL(request.url).searchParams.get('wizard_session_id');
+  if (!wizardSessionId) {
+    return NextResponse.json({ error: 'wizard_session_id is required.' }, { status: 400 });
+  }
+
+  const apiUrl = `${process.env.API_BASE_URL}/connectors/${toolKey}/oauth/start?wizard_session_id=${encodeURIComponent(wizardSessionId)}`;
+  const apiResponse = await fetch(apiUrl, { redirect: 'manual' });
+
+  const location = apiResponse.headers.get('location');
+  if (!location) {
+    return NextResponse.json(
+      { error: `${toolKey} OAuth start failed: no redirect returned by apps/api.` },
+      { status: 502 },
+    );
+  }
+
+  return NextResponse.redirect(location, 307);
+}
