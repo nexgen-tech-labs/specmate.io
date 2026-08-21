@@ -286,7 +286,15 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
           )
         }
       ]
-      scale: { minReplicas: 0, maxReplicas: 3 }
+      // minReplicas: 0 (the original setting) caused ~90s cold starts on
+      // every request after a ~5min idle period — confirmed live via Log
+      // Analytics (ContainerAppSystemLogs_CL "Scaled ... from 0 to 1" events,
+      // dozens/day on low traffic) and reported as "app very slow all over".
+      // minReplicas: 1 keeps one warm replica running at all times — trades
+      // a small continuous cost (this plan uses free credits) for
+      // eliminating cold starts entirely; confirmed post-change response
+      // times dropped from ~90s to ~0.35s.
+      scale: { minReplicas: 1, maxReplicas: 3 }
     }
   }
 }
@@ -335,7 +343,15 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
           env: concat(apiStaticEnvVars, apiSecretEnvVars)
         }
       ]
-      scale: { minReplicas: 0, maxReplicas: 3 }
+      // minReplicas: 0 (the original setting) caused ~90s cold starts on
+      // every request after a ~5min idle period — confirmed live via Log
+      // Analytics (ContainerAppSystemLogs_CL "Scaled ... from 0 to 1" events,
+      // dozens/day on low traffic) and reported as "app very slow all over".
+      // minReplicas: 1 keeps one warm replica running at all times — trades
+      // a small continuous cost (this plan uses free credits) for
+      // eliminating cold starts entirely; confirmed post-change response
+      // times dropped from ~90s to ~0.35s.
+      scale: { minReplicas: 1, maxReplicas: 3 }
     }
   }
 }
