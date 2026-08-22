@@ -32,7 +32,7 @@ CONNECTOR_REGISTRY: dict[str, ConnectorDefinition] = {
     "jira": ConnectorDefinition(
         tool_key="jira",
         display_name="Jira",
-        auth_methods=["ENV_CONFIGURED", "OAUTH"],
+        auth_methods=["ENV_CONFIGURED"],
         scope_picker_type="PROJECT_KEY",
         discovery_fn=jira_publish.discover_as_result,
         capabilities=ConnectorCapabilities(

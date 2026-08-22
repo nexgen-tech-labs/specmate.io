@@ -29,8 +29,17 @@ export async function proxyOAuthStart(request: Request, toolKey: string): Promis
 
   const location = apiResponse.headers.get('location');
   if (!location) {
+    // apps/api returns a non-3xx (e.g. 503 with {"detail": "..."}) when the
+    // OAuth app isn't configured, rather than a redirect — surface that
+    // reason instead of a generic message, since it's the actionable part.
+    const body = await apiResponse.json().catch(() => null);
+    const reason = body && typeof body === 'object' && 'detail' in body ? body.detail : undefined;
     return NextResponse.json(
-      { error: `${toolKey} OAuth start failed: no redirect returned by apps/api.` },
+      {
+        error: `${toolKey} OAuth start failed: no redirect returned by apps/api.`,
+        reason,
+        status: apiResponse.status,
+      },
       { status: 502 },
     );
   }
