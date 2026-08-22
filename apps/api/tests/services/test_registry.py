@@ -17,7 +17,7 @@ def test_jira_capabilities() -> None:
     jira = CONNECTOR_REGISTRY["jira"]
     assert jira.display_name == "Jira"
     assert jira.scope_picker_type == "PROJECT_KEY"
-    assert jira.auth_methods == ["ENV_CONFIGURED"]
+    assert jira.auth_methods == ["ENV_CONFIGURED", "OAUTH"]
     assert jira.capabilities.supports_native_hierarchy is True
     assert jira.capabilities.type_system == "NAMED_TYPES"
     assert jira.capabilities.parent_link_strategy == "NATIVE_FIELD"
@@ -42,13 +42,9 @@ def test_github_capabilities() -> None:
     assert github.capabilities.parent_link_strategy == "TASK_LIST_BACKFILL"
 
 
-def test_github_supports_oauth_jira_and_ado_do_not() -> None:
-    # Jira's OAuth app was never configured in production (see jira_oauth.py's
-    # open infrastructure question about external ingress for the callback) —
-    # advertising OAUTH here sends the wizard down a path that always 503s.
-    # Re-add once a real Atlassian OAuth app is registered and deployed.
+def test_github_and_jira_support_oauth_ado_does_not() -> None:
     assert set(CONNECTOR_REGISTRY["github"].auth_methods) == {"ENV_CONFIGURED", "OAUTH"}
-    assert CONNECTOR_REGISTRY["jira"].auth_methods == ["ENV_CONFIGURED"]
+    assert set(CONNECTOR_REGISTRY["jira"].auth_methods) == {"ENV_CONFIGURED", "OAUTH"}
     assert CONNECTOR_REGISTRY["ado"].auth_methods == ["ENV_CONFIGURED"]
 
 
