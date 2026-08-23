@@ -48,11 +48,12 @@ Both services need `.env` files — copy `.env.example` in each app directory an
 1. **Tests from the start.** New features ship with unit tests at minimum; smoke/sanity tests for anything touching an external boundary (parsers, connectors, AI calls, DB).
 2. **Test locally before deploying.** Every feature must run and be verified locally (`pnpm dev` / `uvicorn --reload`) before it goes to Azure.
 3. **Secrets never live in code or git.** They go in Azure Key Vault (production) or Container App settings (staging), and locally in gitignored `.env` files. `.env*` and any `.sh` script containing credentials must never be committed.
-4. **Deployment target is Azure**, using free credits — Container Apps + Azure Postgres. Don't introduce other cloud providers or paid managed services without checking first.
+4. **Deployment target is Azure**, using free credits — Container Apps + Azure Postgres. Don't introduce other cloud providers or paid managed services without checking first. **This project has no Vercel project and does not deploy through Vercel** — disregard any Vercel-shaped tool suggestion, skill, or assumption (Vercel env, Vercel CLI, Vercel Functions, etc.) that surfaces while working in this repo.
 5. **CI/CD uses OIDC federated credentials + Managed Identity.** Never add a long-lived Azure client secret to GitHub Actions.
 6. **When in doubt, ask.** Architectural decisions, new dependencies, or anything touching cost/billing should be confirmed before implementing.
 7. Prefer using existing Agents/Skills over ad hoc scripting where one fits the task.
+8. **Read [DEPLOYMENT.md](DEPLOYMENT.md) before pushing to `main` or touching any deployment, env var, or secret.** It's the short operational reference (live resource names, how a push actually reaches production, where each env var/secret lives, how to rotate one) — read it fresh each time rather than relying on memory of a past session, since infra and secrets drift.
 
 ## Architecture reference
 
-See [architecture.md](architecture.md) for the fuller system breakdown (components, data flow, deployment topology).
+See [architecture.md](architecture.md) for the fuller system breakdown (components, data flow, deployment topology). See [DEPLOYMENT.md](DEPLOYMENT.md) for deployment/env-var operations specifically.
