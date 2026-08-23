@@ -165,9 +165,17 @@ async def exchange_oauth_code_for_tokens(code: str, redirect_uri: str) -> JiraOA
                     "redirect_uri": redirect_uri,
                 },
             )
-            response.raise_for_status()
     except httpx.HTTPError as exc:
         raise ConnectorError(f"Jira OAuth token exchange request failed: {exc}") from exc
+    if response.status_code != 200:
+        # raise_for_status()'s str(exc) never includes the response body, which
+        # is where Atlassian's actual error/error_description live — surface
+        # the body directly instead of a bare "400 Bad Request" that gives no
+        # way to tell a reused/expired code apart from a redirect_uri mismatch
+        # apart from a bad client secret.
+        raise ConnectorError(
+            f"Jira OAuth token exchange request failed: {response.status_code} {response.text}"
+        )
     payload = response.json()
     access_token = payload.get("access_token")
     refresh_token = payload.get("refresh_token")

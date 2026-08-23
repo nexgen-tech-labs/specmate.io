@@ -71,6 +71,26 @@ async def test_exchange_oauth_code_for_tokens_wraps_http_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_exchange_oauth_code_for_tokens_surfaces_atlassian_error_body_on_non_200() -> None:
+    # Regression: raise_for_status()'s str(exc) never included the response
+    # body, so every real Atlassian rejection (reused code, redirect_uri
+    # mismatch, bad secret) surfaced identically as a bare "400 Bad Request"
+    # with no way to tell which. The body must be in the raised message.
+    fake_response = httpx.Response(
+        status_code=400,
+        json={"error": "invalid_grant", "error_description": "Authorization code has expired."},
+        request=httpx.Request("POST", "https://auth.atlassian.com/oauth/token"),
+    )
+    with (
+        patch.object(settings, "jira_oauth_app_client_id", "test-client-id"),
+        patch.object(settings, "jira_oauth_app_client_secret", "test-secret"),
+        patch("httpx.AsyncClient.post", new=AsyncMock(return_value=fake_response)),
+    ):
+        with pytest.raises(ConnectorError, match="invalid_grant.*Authorization code has expired"):
+            await exchange_oauth_code_for_tokens("expired-code", "https://example.com/callback")
+
+
+@pytest.mark.asyncio
 async def test_refresh_jira_access_token_returns_rotated_tokens() -> None:
     with (
         patch.object(settings, "jira_oauth_app_client_id", "test-client-id"),
