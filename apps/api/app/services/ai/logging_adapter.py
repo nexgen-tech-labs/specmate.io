@@ -28,7 +28,7 @@ class LoggingAdapter:
         started = time.monotonic()
         try:
             result = await self._inner.generate(request)
-        except AIGenerationError as exc:
+        except AIGenerationError:
             # The router only ever surfaces a generic 503 to the client (never
             # str(exc)), and this was the only place the real reason (bad API
             # key, rate limit, malformed schema, ...) could have been recorded
