@@ -7,6 +7,7 @@ the provider implementation.
 
 from __future__ import annotations
 
+import logging
 import time
 from decimal import Decimal
 
@@ -14,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AiCallLog
 from app.services.ai.adapter import AIAdapter, AIGenerationError, GenerationRequest, GenerationResult
+
+logger = logging.getLogger(__name__)
 
 
 class LoggingAdapter:
@@ -25,7 +28,18 @@ class LoggingAdapter:
         started = time.monotonic()
         try:
             result = await self._inner.generate(request)
-        except AIGenerationError:
+        except AIGenerationError as exc:
+            # The router only ever surfaces a generic 503 to the client (never
+            # str(exc)), and this was the only place the real reason (bad API
+            # key, rate limit, malformed schema, ...) could have been recorded
+            # — previously it wasn't, making every failure indistinguishable
+            # in logs. Log it here so a real incident is diagnosable.
+            logger.exception(
+                "AI generation failed task=%r project=%r workspace=%r",
+                request.task,
+                request.project_id,
+                request.workspace_id,
+            )
             latency_ms = int((time.monotonic() - started) * 1000)
             self._session.add(
                 AiCallLog(
