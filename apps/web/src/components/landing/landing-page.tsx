@@ -1,8 +1,6 @@
 'use client';
 
-import { useState } from 'react';
 import { LandingHero } from './landing-hero';
-import { SignInModal } from './sign-in-modal';
 import { StageAudit } from './stage-audit';
 import { StageGenerate } from './stage-generate';
 import { StageIngest } from './stage-ingest';
@@ -27,19 +25,9 @@ export function LandingPage() {
     setDecisions,
   } = useDemoPlayback();
 
-  const [showSignIn, setShowSignIn] = useState(false);
-  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
-
   return (
     <div className="min-h-screen bg-paper text-ink">
-      <LandingHero
-        playing={playing}
-        onRunDemo={runDemo}
-        onSignIn={() => {
-          setAuthMode('signin');
-          setShowSignIn(true);
-        }}
-      />
+      <LandingHero playing={playing} onRunDemo={runDemo} />
       <StageStepper stage={stage} playing={playing} onSelect={goto} />
 
       <main className="mx-auto max-w-[1120px] px-6 pt-6.5 pb-15">
@@ -57,15 +45,6 @@ export function LandingPage() {
         {stage === 3 ? <StagePublish published={published} /> : null}
         {stage === 4 ? <StageAudit /> : null}
       </main>
-
-      {showSignIn ? (
-        <SignInModal
-          authMode={authMode}
-          onModeChange={setAuthMode}
-          onClose={() => setShowSignIn(false)}
-          onBackHome={() => setShowSignIn(false)}
-        />
-      ) : null}
 
       <footer className="border-t border-line bg-panel">
         <div className="mx-auto max-w-[1120px] px-6 py-3">

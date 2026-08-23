@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { Stepper } from '@/components/layout/stepper';
 import type { CollectedState, ConnectorDefinition, WizardSessionData, WizardStep } from './types';
 import { AuthenticateStep } from './steps/authenticate';
 import { SelectScopeStep } from './steps/select-scope';
@@ -176,24 +177,9 @@ export function WizardShell({
       </p>
 
       {currentStep !== 'choose_tool' ? (
-        <ol className="mb-2 mt-8 flex flex-wrap items-center gap-2 text-xs">
-          {STEP_LABELS.map((s, i) => {
-            const active = currentStep === s.key;
-            return (
-              <li key={s.key} className="flex items-center gap-2">
-                <span
-                  className={`flex h-6 w-6 items-center justify-center rounded-full font-mono font-bold ${
-                    active ? 'bg-cobalt text-white' : 'bg-line text-sub'
-                  }`}
-                >
-                  {i + 1}
-                </span>
-                <span className={active ? 'font-semibold text-ink' : 'text-sub'}>{s.label}</span>
-                {i < STEP_LABELS.length - 1 ? <span className="mx-1 text-sub">→</span> : null}
-              </li>
-            );
-          })}
-        </ol>
+        <div className="mt-8 mb-2">
+          <Stepper steps={STEP_LABELS} currentKey={currentStep} />
+        </div>
       ) : null}
 
       <div className="mt-6">

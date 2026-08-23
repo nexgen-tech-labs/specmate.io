@@ -4,6 +4,7 @@ import { Suspense } from 'react';
 import './globals.css';
 import { TourProvider } from '@/components/tour/tour-provider';
 import { TourOverlay } from '@/components/tour/tour-overlay';
+import { AppHeader } from '@/components/layout/app-header';
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -31,6 +32,7 @@ export default function RootLayout({
       <body className="min-h-full flex flex-col">
         <Suspense fallback={null}>
           <TourProvider>
+            <AppHeader />
             {children}
             <TourOverlay />
           </TourProvider>
