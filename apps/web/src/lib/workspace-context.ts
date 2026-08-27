@@ -16,6 +16,21 @@ export {
 } from './workspace-access';
 export type { EffectiveMembership } from './workspace-access';
 
+/**
+ * Resolves where to send a signed-in user with no other workspace context —
+ * shared by the post-sign-in redirect (`/api/me/workspace`) and the landing
+ * page's signed-in redirect, so both agree on "primary workspace" the same
+ * way (oldest membership first).
+ */
+export async function getPrimaryWorkspaceIdForUser(userId: string): Promise<string | null> {
+  const membership = await prisma.workspaceMember.findFirst({
+    where: { userId },
+    orderBy: { createdAt: 'asc' },
+    select: { workspaceId: true },
+  });
+  return membership?.workspaceId ?? null;
+}
+
 export async function getCurrentWorkspaceMembership(
   workspaceId: string,
 ): Promise<EffectiveMembership | null> {

@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { hashPassword } from '@/lib/password';
@@ -6,7 +5,6 @@ import { createTenantForNewUser } from '@/lib/create-tenant';
 import type { OrgSize } from '@prisma/client';
 
 const VALID_ORG_SIZES: OrgSize[] = ['SOLO', 'SMALL', 'MEDIUM', 'LARGE', 'ENTERPRISE'];
-const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface SignupBody {
   name: string;
@@ -15,7 +13,6 @@ interface SignupBody {
   orgName: string;
   orgSize: OrgSize;
   workspaceName: string;
-  teamEmails: string[];
 }
 
 function isValidBody(body: unknown): body is SignupBody {
@@ -33,10 +30,7 @@ function isValidBody(body: unknown): body is SignupBody {
     typeof b.orgSize === 'string' &&
     VALID_ORG_SIZES.includes(b.orgSize as OrgSize) &&
     typeof b.workspaceName === 'string' &&
-    b.workspaceName.trim().length > 0 &&
-    (b.teamEmails === undefined ||
-      (Array.isArray(b.teamEmails) &&
-        b.teamEmails.every((e) => typeof e === 'string' && e.includes('@'))))
+    b.workspaceName.trim().length > 0
   );
 }
 
@@ -58,10 +52,11 @@ export async function POST(request: Request) {
 
   // Full hierarchy at signup (Issue 12.10, extended by the Onboarding Flow
   // redesign): Organization → Workspace → User, with the signing-up user as
-  // org OWNER + workspace ADMIN. Organization now carries its own name + size
-  // as collected by the 4-step signup form, rather than defaulting to the
-  // workspace's name.
-  const { user, workspace } = await createTenantForNewUser({
+  // org OWNER + workspace ADMIN. Organization carries its own name + size as
+  // collected by the 3-step signup form, rather than defaulting to the
+  // workspace's name. Inviting teammates happens later, from the dashboard's
+  // onboarding checklist — the signup form itself no longer collects invites.
+  const { workspace } = await createTenantForNewUser({
     name: body.name,
     email: body.email,
     passwordHash,
@@ -69,25 +64,6 @@ export async function POST(request: Request) {
     orgSize: body.orgSize,
     workspaceName: body.workspaceName,
   });
-
-  // Signup-time team invites (step 4 of the redesigned flow) reuse the exact
-  // same WorkspaceInvite shape as the post-signup invite route — creating an
-  // invite is never gated (gate is at acceptance, see checkSeatGate in
-  // /api/invites/[token]/accept), so a brand-new free/solo workspace can freely
-  // send these; the *acceptance* of a 2nd+ one is what enforces billing.
-  const teamEmails = [...new Set(body.teamEmails ?? [])];
-  if (teamEmails.length > 0) {
-    await prisma.workspaceInvite.createMany({
-      data: teamEmails.map((email) => ({
-        workspaceId: workspace.id,
-        email,
-        role: 'REVIEWER',
-        token: randomUUID(),
-        invitedByUserId: user.id,
-        expiresAt: new Date(Date.now() + INVITE_TTL_MS),
-      })),
-    });
-  }
 
   // workspaceId lets the client route straight into the workspace dashboard
   // (Issue 10.10) instead of dead-ending on a static "done" screen.

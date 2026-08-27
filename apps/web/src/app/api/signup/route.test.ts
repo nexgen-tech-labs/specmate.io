@@ -20,7 +20,6 @@ function validBody(overrides: Record<string, unknown> = {}) {
     orgName: 'Acme Corp',
     orgSize: 'SMALL',
     workspaceName: 'Engineering',
-    teamEmails: [],
     ...overrides,
   };
 }
@@ -91,36 +90,8 @@ describe('POST /api/signup', () => {
     expect(res.status).toBe(400);
   });
 
-  it('creates a WorkspaceInvite per team email, 7-day TTL, REVIEWER role', async () => {
-    const body = validBody({ teamEmails: ['bob@acme.com', 'carol@acme.com'] });
-    const res = await POST(makeRequest(body));
-    expect(res.status).toBe(201);
-    const { workspaceId }: { workspaceId: string } = await res.json();
-    createdWorkspaceIds.push(workspaceId);
-
-    const workspace = await prisma.workspace.findUniqueOrThrow({ where: { id: workspaceId } });
-    createdOrgIds.push(workspace.organizationId!);
-    const user = await prisma.user.findUniqueOrThrow({ where: { email: body.email } });
-    createdUserIds.push(user.id);
-
-    const invites = await prisma.workspaceInvite.findMany({
-      where: { workspaceId },
-      orderBy: { email: 'asc' },
-    });
-    expect(invites).toHaveLength(2);
-    expect(invites.map((i) => i.email)).toEqual(['bob@acme.com', 'carol@acme.com']);
-    for (const invite of invites) {
-      expect(invite.role).toBe('REVIEWER');
-      expect(invite.invitedByUserId).toBe(user.id);
-      expect(invite.status).toBe('PENDING');
-      const ttlDays =
-        (invite.expiresAt.getTime() - invite.createdAt.getTime()) / (1000 * 60 * 60 * 24);
-      expect(ttlDays).toBeCloseTo(7, 0);
-    }
-  });
-
-  it('creates no WorkspaceInvite rows when teamEmails is empty (solo signup unaffected)', async () => {
-    const body = validBody({ teamEmails: [] });
+  it('creates no WorkspaceInvite rows at signup (inviting moved to the dashboard checklist)', async () => {
+    const body = validBody();
     const res = await POST(makeRequest(body));
     expect(res.status).toBe(201);
     const { workspaceId }: { workspaceId: string } = await res.json();

@@ -27,11 +27,11 @@ function fillOrganizationStep(orgName = 'Acme Corp') {
   fireEvent.click(screen.getByRole('button', { name: /continue/i }));
 }
 
-function fillWorkspaceStep(workspaceName = 'Engineering') {
+function submitWorkspaceStep(workspaceName = 'Engineering') {
   fireEvent.change(screen.getByLabelText(/workspace name/i), {
     target: { value: workspaceName },
   });
-  fireEvent.click(screen.getByRole('button', { name: /continue/i }));
+  fireEvent.click(screen.getByRole('button', { name: /enter workspace/i }));
 }
 
 describe('OnboardingPage', () => {
@@ -56,7 +56,7 @@ describe('OnboardingPage', () => {
     expect(screen.getByLabelText(/full name/i)).toBeDefined();
     expect(screen.getByLabelText(/work email/i)).toBeDefined();
     expect(screen.getByLabelText(/^password$/i)).toBeDefined();
-    expect(screen.getByText(/step 1 of 4/i)).toBeDefined();
+    expect(screen.getByText(/step 1 of 3/i)).toBeDefined();
   });
 
   it('rejects a password shorter than 8 characters before advancing', () => {
@@ -74,13 +74,13 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />);
     fillAccountStep();
 
-    expect(screen.getByText(/step 2 of 4/i)).toBeDefined();
+    expect(screen.getByText(/step 2 of 3/i)).toBeDefined();
     // Default org name suggestion derived from the first name, matching the mockup.
     expect(screen.getByLabelText(/organization name/i)).toHaveProperty('value', "Jane's Company");
     expect(screen.getByLabelText(/company size/i)).toBeDefined();
 
     fillOrganizationStep('Acme Corp');
-    expect(screen.getByText(/step 3 of 4/i)).toBeDefined();
+    expect(screen.getByText(/step 3 of 3/i)).toBeDefined();
     expect(screen.getByText(/Acme Corp/)).toBeDefined();
   });
 
@@ -92,52 +92,24 @@ describe('OnboardingPage', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: /back/i }));
 
-    expect(screen.getByText(/step 1 of 4/i)).toBeDefined();
+    expect(screen.getByText(/step 1 of 3/i)).toBeDefined();
     expect(screen.getByLabelText(/full name/i)).toHaveProperty('value', 'Jane Doe');
   });
 
-  it('team step: adds and removes email chips', () => {
-    render(<OnboardingPage />);
-    fillAccountStep();
-    fillOrganizationStep();
-    fillWorkspaceStep();
-
-    expect(screen.getByText(/step 4 of 4/i)).toBeDefined();
-
-    const emailInput = screen.getByPlaceholderText(/teammate@company.com/i);
-    fireEvent.change(emailInput, { target: { value: 'bob@acme.com' } });
-    fireEvent.click(screen.getByRole('button', { name: /^add$/i }));
-
-    expect(screen.getByText('bob@acme.com')).toBeDefined();
-
-    fireEvent.click(screen.getByRole('button', { name: /remove bob@acme.com/i }));
-    expect(screen.queryByText('bob@acme.com')).toBeNull();
-  });
-
-  it('team step: Enter key adds an email chip', () => {
-    render(<OnboardingPage />);
-    fillAccountStep();
-    fillOrganizationStep();
-    fillWorkspaceStep();
-
-    const emailInput = screen.getByPlaceholderText(/teammate@company.com/i);
-    fireEvent.change(emailInput, { target: { value: 'carol@acme.com' } });
-    fireEvent.keyDown(emailInput, { key: 'Enter' });
-
-    expect(screen.getByText('carol@acme.com')).toBeDefined();
-  });
-
-  it('completes signup end-to-end with org, workspace, and team invites, signs in, redirects to the dashboard', async () => {
+  it('shows a provisioning spinner immediately after submitting the workspace step', () => {
     render(<OnboardingPage />);
     fillAccountStep();
     fillOrganizationStep('Acme Corp');
-    fillWorkspaceStep('Engineering');
+    submitWorkspaceStep('Engineering');
 
-    const emailInput = screen.getByPlaceholderText(/teammate@company.com/i);
-    fireEvent.change(emailInput, { target: { value: 'bob@acme.com' } });
-    fireEvent.click(screen.getByRole('button', { name: /^add$/i }));
+    expect(screen.getByText(/creating acme corp \/ engineering/i)).toBeDefined();
+  });
 
-    fireEvent.click(screen.getByRole('button', { name: /create workspace/i }));
+  it('completes signup end-to-end with org and workspace (no team step), signs in, redirects to the dashboard', async () => {
+    render(<OnboardingPage />);
+    fillAccountStep();
+    fillOrganizationStep('Acme Corp');
+    submitWorkspaceStep('Engineering');
 
     await waitFor(() => expect(push).toHaveBeenCalledWith('/workspaces/ws-1'));
 
@@ -152,7 +124,6 @@ describe('OnboardingPage', () => {
           orgName: 'Acme Corp',
           orgSize: 'SOLO',
           workspaceName: 'Engineering',
-          teamEmails: ['bob@acme.com'],
         }),
       }),
     );
@@ -163,24 +134,7 @@ describe('OnboardingPage', () => {
     });
   });
 
-  it('"Skip for now" completes signup with no team invites', async () => {
-    render(<OnboardingPage />);
-    fillAccountStep();
-    fillOrganizationStep('Acme Corp');
-    fillWorkspaceStep('Engineering');
-
-    fireEvent.click(screen.getByRole('button', { name: /skip for now/i }));
-
-    await waitFor(() => expect(push).toHaveBeenCalledWith('/workspaces/ws-1'));
-    expect(global.fetch).toHaveBeenCalledWith(
-      '/api/signup',
-      expect.objectContaining({
-        body: expect.stringContaining('"teamEmails":[]') as string,
-      }),
-    );
-  });
-
-  it('shows an error if the signup API call fails', async () => {
+  it('shows an error and returns to the workspace step if the signup API call fails', async () => {
     vi.stubGlobal(
       'fetch',
       vi
@@ -191,9 +145,10 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />);
     fillAccountStep();
     fillOrganizationStep('Acme Corp');
-    fillWorkspaceStep('Engineering');
-    fireEvent.click(screen.getByRole('button', { name: /skip for now/i }));
+    submitWorkspaceStep('Engineering');
 
     await waitFor(() => expect(screen.getByText('Email already in use.')).toBeDefined());
+    // Back on the workspace form, not stuck on the spinner.
+    expect(screen.getByLabelText(/workspace name/i)).toBeDefined();
   });
 });
