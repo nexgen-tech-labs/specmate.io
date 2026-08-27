@@ -242,6 +242,11 @@ def test_mapping_upsert_suggests_defaults_from_discovery() -> None:
     ids = asyncio.run(_fixture())
     fake = _FakeJira()
     app.dependency_overrides[get_publish_gateway] = fake.gateway
+    # A preceding test file's asyncio.run()-scoped loop can leave the shared
+    # app engine's pool holding a connection bound to an already-closed loop
+    # (asyncpg cross-loop check -> "Event loop is closed") — dispose first,
+    # matching the pattern already established in test_org_connectors.py.
+    _dispose()
     client = TestClient(app)
     try:
         response = client.post(
