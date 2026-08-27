@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # that bypasses Key Vault entirely; never used in production.
     azure_key_vault_url: str = ""
     connector_dek_b64: str = ""
+    # specmate-api's Container App uses a user-assigned managed identity, not a
+    # system-assigned one — DefaultAzureCredential() with no arguments only
+    # tries the system-assigned identity endpoint and fails ("Unable to load
+    # the proper Managed Identity"), so the user-assigned identity's client id
+    # must be passed explicitly. Distinct from azure_ad_client_id above (that's
+    # the separate Azure AD app registration used for ADO OAuth).
+    azure_managed_identity_client_id: str = ""
     # GitHub OAuth App (Issue #101) — for per-workspace delegated connector auth,
     # distinct from GITHUB_TOKEN (the existing single-tenant PAT fallback) AND
     # distinct from Issue #95's GITHUB_OAUTH_CLIENT_ID (that's for SpecMate USER

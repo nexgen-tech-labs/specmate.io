@@ -52,7 +52,14 @@ def _fetch_dek_from_source() -> bytes:
             "AZURE_KEY_VAULT_URL is not configured — cannot fetch the connector "
             "credential encryption key."
         )
-    client = SecretClient(vault_url=vault_url, credential=DefaultAzureCredential())
+    # specmate-api runs under a user-assigned managed identity — DefaultAzureCredential
+    # must be told its client id explicitly, or it only probes for a system-assigned
+    # identity and fails with "Unable to load the proper Managed Identity" (confirmed
+    # live in production: Jira OAuth callback 500s at this exact call).
+    credential = DefaultAzureCredential(
+        managed_identity_client_id=settings.azure_managed_identity_client_id or None
+    )
+    client = SecretClient(vault_url=vault_url, credential=credential)
     secret = client.get_secret("connector-credentials-dek")
     if not secret.value:
         raise RuntimeError(

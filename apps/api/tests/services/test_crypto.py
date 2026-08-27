@@ -1,6 +1,13 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from app.services.crypto import CredentialDecryptionError, decrypt_credentials, encrypt_credentials
+from app.services.crypto import (
+    CredentialDecryptionError,
+    _fetch_dek_from_source,
+    decrypt_credentials,
+    encrypt_credentials,
+)
 
 
 def test_encrypt_then_decrypt_round_trips_to_original_value(monkeypatch):
@@ -66,3 +73,51 @@ def test_cached_key_is_reused_across_calls(monkeypatch):
     encrypt_credentials("value-two")
     assert call_count == 1
     crypto_module._cached_dek = None  # reset for other tests
+
+
+def test_fetch_dek_passes_managed_identity_client_id_to_default_azure_credential(monkeypatch):
+    # specmate-api runs under a user-assigned managed identity — a bare
+    # DefaultAzureCredential() only probes for a system-assigned identity and
+    # fails ("Unable to load the proper Managed Identity"), confirmed live in
+    # production against the real Jira OAuth callback. Regression test for
+    # that incident: the client id from settings must reach the credential.
+    monkeypatch.setattr("app.core.config.settings.connector_dek_b64", "")
+    monkeypatch.setattr("app.core.config.settings.azure_key_vault_url", "https://kv.example/")
+    monkeypatch.setattr(
+        "app.core.config.settings.azure_managed_identity_client_id", "fake-client-id"
+    )
+
+    fake_secret = MagicMock()
+    fake_secret.value = "ZmFrZS1kZWs="  # base64 doesn't matter here, just non-empty
+    fake_secret_client = MagicMock()
+    fake_secret_client.get_secret.return_value = fake_secret
+
+    with (
+        patch("azure.identity.DefaultAzureCredential") as fake_credential_cls,
+        patch("azure.keyvault.secrets.SecretClient", return_value=fake_secret_client),
+    ):
+        _fetch_dek_from_source()
+
+    fake_credential_cls.assert_called_once_with(managed_identity_client_id="fake-client-id")
+
+
+def test_fetch_dek_passes_none_when_no_managed_identity_client_id_configured(monkeypatch):
+    # Local/CI runs (no managed identity at all) must still pass None rather
+    # than an empty string, which azure-identity would treat as a real
+    # (invalid) client id instead of "use the default probing behavior."
+    monkeypatch.setattr("app.core.config.settings.connector_dek_b64", "")
+    monkeypatch.setattr("app.core.config.settings.azure_key_vault_url", "https://kv.example/")
+    monkeypatch.setattr("app.core.config.settings.azure_managed_identity_client_id", "")
+
+    fake_secret = MagicMock()
+    fake_secret.value = "ZmFrZS1kZWs="
+    fake_secret_client = MagicMock()
+    fake_secret_client.get_secret.return_value = fake_secret
+
+    with (
+        patch("azure.identity.DefaultAzureCredential") as fake_credential_cls,
+        patch("azure.keyvault.secrets.SecretClient", return_value=fake_secret_client),
+    ):
+        _fetch_dek_from_source()
+
+    fake_credential_cls.assert_called_once_with(managed_identity_client_id=None)
