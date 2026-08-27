@@ -287,25 +287,40 @@ class JiraOAuthConnection:
         return "3"
 
 
-async def resolve_jira_connection(session: AsyncSession, workspace_id: str) -> JiraConnection:
-    """Per-workspace connection resolution (fast-follow to Issue #101):
-    prefers a stored OAuth Connection for this workspace, transparently
-    refreshing an expired access token (persisting the rotated refresh
-    token — Atlassian invalidates the old one on every refresh), falls back
-    to the existing single-tenant env-configured connection unchanged."""
+async def resolve_jira_connection(
+    session: AsyncSession,
+    workspace_id: str | None = None,
+    *,
+    organization_id: str | None = None,
+) -> JiraConnection:
+    """Connection resolution (fast-follow to Issue #101, extended for org-level
+    auth by the Onboarding Flow redesign): prefers a stored OAuth Connection
+    for the given workspace OR organization (exactly one must be passed),
+    transparently refreshing an expired access token (persisting the rotated
+    refresh token — Atlassian invalidates the old one on every refresh), falls
+    back to the single-tenant env-configured connection unchanged when no
+    workspace-scoped row exists. Org-level lookups have no env-configured
+    fallback — env config has no notion of "organization"."""
     from app.models import Connection
     from app.services.crypto import decrypt_credentials, encrypt_credentials
 
+    if (workspace_id is None) == (organization_id is None):
+        raise ValueError("Pass exactly one of workspace_id or organization_id.")
+
+    scope_id = workspace_id if workspace_id is not None else organization_id
+    scope_column = Connection.workspaceId if workspace_id is not None else Connection.organizationId
+
     row = (
         await session.execute(
-            select(Connection).where(Connection.workspaceId == workspace_id, Connection.toolKey == "jira")
+            select(Connection).where(scope_column == scope_id, Connection.toolKey == "jira")
         )
     ).scalar_one_or_none()
     if row and row.authMethod == "OAUTH" and row.encryptedCredentials:
         cloud_id = (row.scope or {}).get("cloud_id")
         if not isinstance(cloud_id, str):
+            scope_label = "workspace" if workspace_id is not None else "organization"
             raise ConnectorError(
-                f"Jira Connection for workspace {workspace_id} has no cloud_id in scope — reconnect required."
+                f"Jira Connection for {scope_label} {scope_id} has no cloud_id in scope — reconnect required."
             )
         tokens: dict[str, object] = json.loads(decrypt_credentials(row.encryptedCredentials))
         if float(tokens["expires_at"]) <= time.time():  # type: ignore[arg-type]
@@ -341,6 +356,10 @@ async def resolve_jira_connection(session: AsyncSession, workspace_id: str) -> J
             row.updatedAt = datetime.now(UTC).replace(tzinfo=None)
             await session.commit()
         return JiraOAuthConnection(access_token=str(tokens["access_token"]), cloud_id=cloud_id)
+    if organization_id is not None:
+        raise ConnectorError(
+            f"No Jira OAuth Connection for organization {organization_id} — authorize Jira at the org level first."
+        )
     return get_jira_connection()
 
 

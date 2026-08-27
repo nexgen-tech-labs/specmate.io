@@ -53,9 +53,11 @@ model Organization {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  members    OrganizationMember[]
-  workspaces Workspace[]
-  invites    OrganizationInvite[]
+  members           OrganizationMember[]
+  workspaces        Workspace[]
+  invites           OrganizationInvite[]
+  connections       Connection[]
+  orgWizardSessions OrgWizardSession[]
 }
 
 model OrganizationMember {
@@ -146,59 +148,65 @@ enum SubscriptionStatus {
 }
 
 model Workspace {
-  id             String    @id @default(cuid())
-  name           String
+  id                             String    @id @default(cuid())
+  name                           String
   // Nullable by design (Issue 12.10): all real workspaces have an organization
   // (backfilled implicit single-workspace orgs for pre-hierarchy data; signup
   // always creates one), but the column stays nullable so a workspace with no
   // org is simply "no org-level grants" (deny-by-default) rather than a broken
   // row — and existing test fixtures keep working unchanged.
-  organizationId String?
+  organizationId                 String?
   // Manually-set placeholder for the workspace's subscription revenue, used only to
   // compute an AI cost-to-revenue ratio (Issue #1.6). Superseded by real subscription
   // data (subscriptionBaseUsd) once Stripe billing is live for a workspace (Issue
   // 10.9) — kept as a fallback for ENTERPRISE workspaces billed outside Stripe.
-  planRevenueUsd Decimal?  @db.Decimal(10, 2)
+  planRevenueUsd                 Decimal?  @db.Decimal(10, 2)
   // Duplicate-detection sensitivity (Issue 3.5), 0..1; null -> env default.
-  duplicateThreshold Float?
+  duplicateThreshold             Float?
   // 1 = single-reviewer approval (default); 2 = reviewer approval + ADMIN sign-off (Issue 4.7).
-  approvalStages Int @default(1)
+  approvalStages                 Int       @default(1)
   // Time-to-first-value instrumentation (Issue 10.10): stamped once, the first time
   // this workspace's first generation run completes. createdAt is the signup moment,
   // so (firstGenerationAt - createdAt) is the workspace's actual time-to-first-value.
-  firstGenerationAt DateTime?
+  firstGenerationAt              DateTime?
+  // Onboarding Flow redesign: set once a member dismisses the dashboard's
+  // "Set up your workspace" checklist. Server-side (not localStorage) so
+  // dismissal is consistent across devices/teammates, matching the checklist's
+  // own completion state, which is already server-derived from real data.
+  onboardingChecklistDismissedAt DateTime?
 
   // Pricing & billing (Issue 10.9). STARTER is self-serve, billed via Stripe
   // (subscriptionBaseUsd + metered per-published-item overage — see UsagePeriod).
   // ENTERPRISE is sales-assisted, custom pricing, not necessarily billed through
   // Stripe (falls back to planRevenueUsd for cost-to-revenue tracking).
-  pricingTier            PricingTier        @default(STARTER)
-  subscriptionStatus     SubscriptionStatus @default(NONE)
-  stripeCustomerId       String?            @unique
-  stripeSubscriptionId   String?            @unique
+  pricingTier          PricingTier        @default(STARTER)
+  subscriptionStatus   SubscriptionStatus @default(NONE)
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
   // Real base subscription price once a Stripe subscription is active — read from
   // the Stripe subscription object, not hand-entered like planRevenueUsd.
-  subscriptionBaseUsd    Decimal?           @db.Decimal(10, 2)
+  subscriptionBaseUsd  Decimal?           @db.Decimal(10, 2)
 
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  deletedAt      DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
-  organization              Organization?             @relation(fields: [organizationId], references: [id])
-  members                   WorkspaceMember[]
-  teams                     Team[]
-  projects                  Project[]
-  auditEvents               AuditEvent[]
-  invites                   WorkspaceInvite[]
-  aiCallLogs                AiCallLog[]
-  snapshots                 Snapshot[]
-  usagePeriods              UsagePeriod[]
-  atlassianConnectInstalls  AtlassianConnectInstall[]
-  apiRateLimitCounters      ApiRateLimitCounter[]
-  usageReconciliationFlags  UsageReconciliationFlag[]
-  connections               Connection[]
-  wizardSessions            WizardSession[]
-  connectionRequests        ConnectionRequest[]
+  organization             Organization?              @relation(fields: [organizationId], references: [id])
+  members                  WorkspaceMember[]
+  teams                    Team[]
+  projects                 Project[]
+  auditEvents              AuditEvent[]
+  invites                  WorkspaceInvite[]
+  aiCallLogs               AiCallLog[]
+  snapshots                Snapshot[]
+  usagePeriods             UsagePeriod[]
+  atlassianConnectInstalls AtlassianConnectInstall[]
+  apiRateLimitCounters     ApiRateLimitCounter[]
+  usageReconciliationFlags UsageReconciliationFlag[]
+  connections              Connection[]
+  wizardSessions           WizardSession[]
+  connectionRequests       ConnectionRequest[]
+  connectionScopes         WorkspaceConnectionScope[]
 }
 
 // One row per Jira Cloud site that has installed the SpecMate Atlassian
@@ -261,13 +269,13 @@ model UsagePeriod {
 // auto-correct, a human resolves. "Resolved" is inferred from resolvedAt
 // being non-null, same convention as DriftFlag's resolution-nullability.
 model UsageReconciliationFlag {
-  id              String    @id @default(cuid())
-  usagePeriodId   String    @unique
-  workspaceId     String
-  internalCount   Int
-  stripeCount     Int
-  detectedAt      DateTime  @default(now())
-  resolvedAt      DateTime?
+  id               String    @id @default(cuid())
+  usagePeriodId    String    @unique
+  workspaceId      String
+  internalCount    Int
+  stripeCount      Int
+  detectedAt       DateTime  @default(now())
+  resolvedAt       DateTime?
   resolvedByUserId String?
 
   usagePeriod UsagePeriod @relation(fields: [usagePeriodId], references: [id])
@@ -293,14 +301,14 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  accounts         Account[]
-  memberships      WorkspaceMember[]
-  orgMemberships   OrganizationMember[]
-  teamMemberships  TeamMember[]
-  reviewDecisions  ReviewDecision[]
-  auditEvents      AuditEvent[]
-  sentInvites      WorkspaceInvite[]
-  sentOrgInvites   OrganizationInvite[]
+  accounts               Account[]
+  memberships            WorkspaceMember[]
+  orgMemberships         OrganizationMember[]
+  teamMemberships        TeamMember[]
+  reviewDecisions        ReviewDecision[]
+  auditEvents            AuditEvent[]
+  sentInvites            WorkspaceInvite[]
+  sentOrgInvites         OrganizationInvite[]
   sentConnectionRequests ConnectionRequest[]
 }
 
@@ -390,10 +398,10 @@ model Project {
   updatedAt   DateTime  @updatedAt
   deletedAt   DateTime?
 
-  workspace      Workspace       @relation(fields: [workspaceId], references: [id])
-  sources        Source[]
-  draftItems     DraftItem[]
-  aiCallLogs     AiCallLog[]
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id])
+  sources         Source[]
+  draftItems      DraftItem[]
+  aiCallLogs      AiCallLog[]
   referenceItems  ReferenceItem[]
   generationRuns  GenerationRun[]
   publishMappings PublishMapping[]
@@ -403,39 +411,39 @@ model Project {
 }
 
 model Source {
-  id         String       @id @default(cuid())
-  projectId  String
-  name       String
-  kind       SourceKind
-  status     SourceStatus @default(QUEUED)
-  storageKey String?
-  sizeBytes  Int?
-  mimeType   String?
+  id                String       @id @default(cuid())
+  projectId         String
+  name              String
+  kind              SourceKind
+  status            SourceStatus @default(QUEUED)
+  storageKey        String?
+  sizeBytes         Int?
+  mimeType          String?
   // External identity for connector-sourced content (Confluence page ID, Slack channel
   // ID) — re-syncing upserts by (projectId, externalRef) instead of duplicating Sources.
-  externalRef String?
+  externalRef       String?
   // Last parse failure message (human-readable, from the typed parser errors) — shown
   // in the source management UI so failures are actionable. Cleared on successful parse.
-  parseError String?
+  parseError        String?
   // Always PENDING -> CLEAN today (see apps/web/src/lib/upload-validation.ts#scanFile) — no real
   // AV integration exists yet. INFECTED is modeled now so the schema doesn't need a follow-up
   // migration once a real scanner is wired up.
-  scanStatus ScanStatus   @default(PENDING)
+  scanStatus        ScanStatus   @default(PENDING)
   // Versioning (Issue 9.1): re-uploading over an existing Source creates a NEW Source
   // row chained via previousVersionId, rather than overwriting — the prior version's
   // Source + RawRequirements stay queryable/untouched. version=1 for originals.
-  version           Int     @default(1)
+  version           Int          @default(1)
   previousVersionId String?
-  createdAt  DateTime     @default(now())
-  updatedAt  DateTime     @updatedAt
-  deletedAt  DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  deletedAt         DateTime?
 
-  project          Project           @relation(fields: [projectId], references: [id])
-  rawRequirements  RawRequirement[]
-  traceLinks       TraceLink[]
-  previousVersion  Source?           @relation("SourceVersionChain", fields: [previousVersionId], references: [id])
-  nextVersions     Source[]          @relation("SourceVersionChain")
-  diffs            SourceDiff[]
+  project         Project          @relation(fields: [projectId], references: [id])
+  rawRequirements RawRequirement[]
+  traceLinks      TraceLink[]
+  previousVersion Source?          @relation("SourceVersionChain", fields: [previousVersionId], references: [id])
+  nextVersions    Source[]         @relation("SourceVersionChain")
+  diffs           SourceDiff[]
 
   @@unique([projectId, externalRef])
 }
@@ -444,16 +452,16 @@ model Source {
 // RawRequirements against its previousVersion's, at the fragment level. Read by
 // targeted regeneration (Issue 9.2) to scope which fragments actually changed.
 model SourceDiff {
-  id              String   @id @default(cuid())
-  sourceId        String
+  id               String   @id @default(cuid())
+  sourceId         String
   previousSourceId String
-  addedCount      Int
-  removedCount    Int
-  modifiedCount   Int
-  unchangedCount  Int
+  addedCount       Int
+  removedCount     Int
+  modifiedCount    Int
+  unchangedCount   Int
   // [{changeType: added|removed|modified|unchanged, rawRequirementId, previousRawRequirementId, sectionPath}]
-  fragments Json
-  createdAt DateTime @default(now())
+  fragments        Json
+  createdAt        DateTime @default(now())
 
   source Source @relation(fields: [sourceId], references: [id])
 
@@ -482,38 +490,38 @@ enum DraftItemStatus {
 }
 
 model DraftItem {
-  id           String          @id @default(cuid())
-  projectId    String
-  type         DraftItemType
-  title        String
-  description  String
-  payload      Json?
-  qualityScore Int?
-  parentId     String?
+  id                String          @id @default(cuid())
+  projectId         String
+  type              DraftItemType
+  title             String
+  description       String
+  payload           Json?
+  qualityScore      Int?
+  parentId          String?
   // Review state (Epic 4). APPROVED locks further regeneration unless reopened.
-  status       DraftItemStatus @default(PENDING)
+  status            DraftItemStatus @default(PENDING)
   // Two-stage approval (Issue 4.7): set when an ADMIN signs off after approval.
   // Only consulted when Workspace.approvalStages == 2.
   signedOffByUserId String?
   // Generation metadata (Epic 3)
-  promptVersion   String?
-  generationRunId String?
+  promptVersion     String?
+  generationRunId   String?
   // {completeness, clarity, testability, specificity, rationale} — Issue 3.4
-  scoreDetail Json?
+  scoreDetail       Json?
   // {duplicate: {key, confidence, tool}, gap: {question}, noTrace: bool} — Issues 3.5/3.6/3.3
-  flags Json?
+  flags             Json?
   // Immutable first AI draft {title, description, payload} — never overwritten (Issue 4.3)
-  originalDraft Json?
+  originalDraft     Json?
   // Sequence of field-level diffs [{at, actorUserId, field, before, after}] (Issue 4.3)
-  editHistory Json?
+  editHistory       Json?
   // Revision chain for regeneration (Issue 3.9): this item supersedes revisionOfId
-  revisionOfId String?
+  revisionOfId      String?
   // Set only by targeted regeneration (Issue 9.2) to the triggering new-version Source —
   // the delta review queue (Issue 9.3) filters on this to show just this run's changes.
-  sourceVersionId String?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  deletedAt    DateTime?
+  sourceVersionId   String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  deletedAt         DateTime?
 
   project         Project          @relation(fields: [projectId], references: [id])
   parent          DraftItem?       @relation("DraftItemHierarchy", fields: [parentId], references: [id])
@@ -524,32 +532,32 @@ model DraftItem {
 }
 
 model ReviewDecision {
-  id           String              @id @default(cuid())
-  draftItemId  String
-  decision     ReviewDecisionType
-  actorUserId  String
-  notes        String?
-  createdAt    DateTime            @default(now())
+  id          String             @id @default(cuid())
+  draftItemId String
+  decision    ReviewDecisionType
+  actorUserId String
+  notes       String?
+  createdAt   DateTime           @default(now())
 
   draftItem DraftItem @relation(fields: [draftItemId], references: [id])
   actor     User      @relation(fields: [actorUserId], references: [id])
 }
 
 model PublishedItem {
-  id          String        @id @default(cuid())
-  draftItemId String
-  targetTool  PublishTarget
-  externalKey String
-  externalUrl String
+  id             String        @id @default(cuid())
+  draftItemId    String
+  targetTool     PublishTarget
+  externalKey    String
+  externalUrl    String
   // Snapshot of {title, description, status} as SpecMate last wrote/read it —
   // the baseline drift detection (Issue 9.5) diffs the live remote state against.
   // Set on every create/update publish and refreshed on every drift check.
   lastKnownState Json?
   lastSyncedAt   DateTime?
-  createdAt   DateTime      @default(now())
-  deletedAt   DateTime?
+  createdAt      DateTime      @default(now())
+  deletedAt      DateTime?
 
-  draftItem  DraftItem    @relation(fields: [draftItemId], references: [id])
+  draftItem  DraftItem   @relation(fields: [draftItemId], references: [id])
   traceLinks TraceLink[]
   driftFlags DriftFlag[]
 }
@@ -563,13 +571,13 @@ enum DriftResolution {
 }
 
 model DriftFlag {
-  id              String           @id @default(cuid())
-  publishedItemId String
+  id               String           @id @default(cuid())
+  publishedItemId  String
   // What changed, e.g. {title: {before, after}, description: {before, after}, status: {before, after}}
-  diff            Json
-  detectedAt      DateTime         @default(now())
-  resolution      DriftResolution?
-  resolvedAt      DateTime?
+  diff             Json
+  detectedAt       DateTime         @default(now())
+  resolution       DriftResolution?
+  resolvedAt       DateTime?
   resolvedByUserId String?
 
   publishedItem PublishedItem @relation(fields: [publishedItemId], references: [id])
@@ -657,8 +665,8 @@ model WorkspaceInvite {
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
-  workspace  Workspace @relation(fields: [workspaceId], references: [id])
-  invitedBy  User      @relation(fields: [invitedByUserId], references: [id])
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  invitedBy User      @relation(fields: [invitedByUserId], references: [id])
 }
 
 model OrganizationInvite {
@@ -706,16 +714,16 @@ enum TicketFormatMode {
 }
 
 model PublishMapping {
-  id             String            @id @default(cuid())
-  projectId      String
-  tool           PublishTarget
-  remoteProject  String // Jira project key / ADO project name / GitHub "owner/repo"
-  typeMap        Json // {EPIC: "Epic", STORY: "Story", ...}
-  fieldDefaults  Json? // {customfield_10020: "Backend", ...} fixed values for required fields
-  metadata       Json? // discovery snapshot {issueTypes: [...], fetchedAt}
-  formatMode     TicketFormatMode  @default(HUMAN)
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+  id            String           @id @default(cuid())
+  projectId     String
+  tool          PublishTarget
+  remoteProject String // Jira project key / ADO project name / GitHub "owner/repo"
+  typeMap       Json // {EPIC: "Epic", STORY: "Story", ...}
+  fieldDefaults Json? // {customfield_10020: "Backend", ...} fixed values for required fields
+  metadata      Json? // discovery snapshot {issueTypes: [...], fetchedAt}
+  formatMode    TicketFormatMode @default(HUMAN)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
 
   project Project @relation(fields: [projectId], references: [id])
 
@@ -754,10 +762,10 @@ model TraceLink {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  source         Source          @relation(fields: [sourceId], references: [id])
-  rawRequirement RawRequirement  @relation(fields: [rawRequirementId], references: [id])
-  draftItem      DraftItem       @relation(fields: [draftItemId], references: [id])
-  publishedItem  PublishedItem?  @relation(fields: [publishedItemId], references: [id])
+  source         Source         @relation(fields: [sourceId], references: [id])
+  rawRequirement RawRequirement @relation(fields: [rawRequirementId], references: [id])
+  draftItem      DraftItem      @relation(fields: [draftItemId], references: [id])
+  publishedItem  PublishedItem? @relation(fields: [publishedItemId], references: [id])
 }
 
 // Per-workspace connector credential storage (Issue #101) — the first real
@@ -766,9 +774,19 @@ model TraceLink {
 // encryptedCredentials is null for ENV_CONFIGURED (nothing to store — the
 // workspace just uses the ops-configured env credentials); populated only
 // for OAUTH-authenticated connections (GitHub, in this issue).
+// Tool authorization (Jira/ADO/GitHub OAuth or env-configured). Historically
+// workspace-scoped only; the Onboarding Flow redesign added org-level auth
+// ("authorize once, every workspace in the org picks its own board") without
+// removing the workspace-scoped path, so exactly one of workspaceId/
+// organizationId is set per row — enforced at the application layer (Prisma
+// has no @@check), never both and never neither. Existing rows keep
+// workspaceId populated even after being backfilled with organizationId (see
+// migration add_org_connector_auth), so workspace-scoped resolvers keep
+// working unchanged during the transition.
 model Connection {
   id                   String    @id @default(cuid())
-  workspaceId          String
+  workspaceId          String?
+  organizationId       String?
   toolKey              String
   authMethod           String // "ENV_CONFIGURED" | "OAUTH"
   encryptedCredentials Bytes?
@@ -777,9 +795,51 @@ model Connection {
   updatedAt            DateTime  @updatedAt
   lastHealthCheckAt    DateTime?
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  workspace       Workspace?                 @relation(fields: [workspaceId], references: [id])
+  organization    Organization?              @relation(fields: [organizationId], references: [id])
+  workspaceScopes WorkspaceConnectionScope[]
 
   @@unique([workspaceId, toolKey])
+  @@unique([organizationId, toolKey])
+}
+
+// Which board/project/repo a workspace has picked from its organization's
+// tool authorization (design: "Authorize once, use everywhere — each
+// workspace picks which board or repo it works against"). One pick per
+// workspace per org-level Connection, matching the existing one-connection-
+// per-tool-per-workspace assumption elsewhere in the codebase.
+model WorkspaceConnectionScope {
+  id           String   @id @default(cuid())
+  workspaceId  String
+  connectionId String
+  scopeValue   String // Jira project key / ADO project name / GitHub "owner/repo"
+  scopeLabel   String // display name, cached from discovery at pick-time
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  workspace  Workspace  @relation(fields: [workspaceId], references: [id])
+  connection Connection @relation(fields: [connectionId], references: [id])
+
+  @@unique([workspaceId, connectionId])
+}
+
+// Resumable org-level connector authorization progress — parallel to
+// WizardSession, which is inherently project-scoped. Kept as a separate model
+// rather than making WizardSession.projectId nullable: the two flows have
+// materially different steps (org auth is just authenticate -> confirm, no
+// select_scope/review_defaults/test_connection), and mixing nullable-projectId
+// semantics into the existing, heavily-tested project wizard risks regressions
+// there for no benefit.
+model OrgWizardSession {
+  id             String   @id @default(cuid())
+  organizationId String
+  toolKey        String
+  currentStep    String // "authenticate" | "confirm"
+  collectedState Json     @default("{}")
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+
+  organization Organization @relation(fields: [organizationId], references: [id])
 }
 
 // Resumable wizard progress (Issue #101 AC: survive a browser refresh mid-OAuth-

@@ -170,6 +170,9 @@ class Workspace(Base):
     duplicateThreshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     approvalStages: Mapped[int] = mapped_column(Integer, default=1)
     firstGenerationAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    onboardingChecklistDismissedAt: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
     pricingTier: Mapped[PricingTier] = mapped_column(
         Enum(PricingTier, name="PricingTier", create_type=False), default=PricingTier.STARTER
     )
@@ -595,17 +598,24 @@ class ReferenceItem(Base):
 
 
 class Connection(Base):
-    """Per-workspace connector credential storage (Issue #101) — the first real
-    per-workspace connection store this repo has built; every prior connector
-    (Jira/ADO/GitHub) has been single-tenant env-var auth until now.
-    encryptedCredentials is null for ENV_CONFIGURED (nothing to store — the
-    workspace just uses the ops-configured env credentials); populated only
-    for OAUTH-authenticated connections (GitHub, in this issue)."""
+    """Connector credential storage (Issue #101), workspace- or org-scoped.
+    Historically workspace-only; the Onboarding Flow redesign added org-level
+    auth ("authorize once, every workspace in the org picks its own board")
+    without removing the workspace-scoped path — exactly one of
+    workspaceId/organizationId is set per row, enforced at the application
+    layer (never both, never neither). encryptedCredentials is null for
+    ENV_CONFIGURED (nothing to store — just uses ops-configured env
+    credentials); populated only for OAUTH-authenticated connections."""
 
     __tablename__ = "Connection"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
-    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    workspaceId: Mapped[str | None] = mapped_column(
+        ForeignKey("Workspace.id"), nullable=True
+    )
+    organizationId: Mapped[str | None] = mapped_column(
+        ForeignKey("Organization.id"), nullable=True
+    )
     toolKey: Mapped[str] = mapped_column(String)
     authMethod: Mapped[str] = mapped_column(String)
     encryptedCredentials: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
@@ -613,6 +623,22 @@ class Connection(Base):
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     lastHealthCheckAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class WorkspaceConnectionScope(Base):
+    """Which board/project/repo a workspace has picked from its organization's
+    tool authorization — see Connection's docstring. One pick per workspace
+    per org-level Connection."""
+
+    __tablename__ = "WorkspaceConnectionScope"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    connectionId: Mapped[str] = mapped_column(ForeignKey("Connection.id"))
+    scopeValue: Mapped[str] = mapped_column(String)
+    scopeLabel: Mapped[str] = mapped_column(String)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
 
 class WizardSession(Base):
@@ -626,6 +652,24 @@ class WizardSession(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
     workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
     projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
+    toolKey: Mapped[str] = mapped_column(String)
+    currentStep: Mapped[str] = mapped_column(String)
+    collectedState: Mapped[dict[str, object]] = mapped_column(JSONB)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    expiresAt: Mapped[datetime] = mapped_column(DateTime)
+
+
+class OrgWizardSession(Base):
+    """Resumable org-level connector authorization progress — the org-scoped
+    analogue of WizardSession, kept separate rather than making
+    WizardSession.projectId nullable (the two flows have materially different
+    steps, and mixing nullable-projectId semantics into the existing,
+    heavily-tested project wizard risks regressions there)."""
+
+    __tablename__ = "OrgWizardSession"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    organizationId: Mapped[str] = mapped_column(ForeignKey("Organization.id"))
     toolKey: Mapped[str] = mapped_column(String)
     currentStep: Mapped[str] = mapped_column(String)
     collectedState: Mapped[dict[str, object]] = mapped_column(JSONB)

@@ -115,27 +115,43 @@ class OAuthTokenConnection:
         }
 
 
-async def resolve_github_connection(session: "AsyncSession", workspace_id: str) -> GitHubConnection:
-    """Per-workspace connection resolution (Issue #101): prefers a stored OAuth
-    Connection for this workspace, falls back to the existing single-tenant
-    env-configured connection unchanged — so GitHub publishing keeps working
-    exactly as before for every workspace that hasn't gone through the OAuth
-    wizard."""
+async def resolve_github_connection(
+    session: "AsyncSession",
+    workspace_id: str | None = None,
+    *,
+    organization_id: str | None = None,
+) -> GitHubConnection:
+    """Connection resolution (Issue #101, extended for org-level auth by the
+    Onboarding Flow redesign): prefers a stored OAuth Connection for the given
+    workspace OR organization (exactly one must be passed), falls back to the
+    single-tenant env-configured connection unchanged when no workspace-scoped
+    row exists — so GitHub publishing keeps working exactly as before for
+    every workspace that hasn't gone through the OAuth wizard. Org-level
+    lookups have no env-configured fallback — env config has no notion of
+    "organization"."""
     from sqlalchemy import select
 
     from app.models import Connection
     from app.services.crypto import decrypt_credentials
 
+    if (workspace_id is None) == (organization_id is None):
+        raise ValueError("Pass exactly one of workspace_id or organization_id.")
+
+    scope_column = Connection.workspaceId if workspace_id is not None else Connection.organizationId
+    scope_id = workspace_id if workspace_id is not None else organization_id
+
     row = (
         await session.execute(
-            select(Connection).where(
-                Connection.workspaceId == workspace_id, Connection.toolKey == "github"
-            )
+            select(Connection).where(scope_column == scope_id, Connection.toolKey == "github")
         )
     ).scalar_one_or_none()
     if row and row.authMethod == "OAUTH" and row.encryptedCredentials:
         token = decrypt_credentials(row.encryptedCredentials)
         return OAuthTokenConnection(token=token)
+    if organization_id is not None:
+        raise ConnectorError(
+            f"No GitHub OAuth Connection for organization {organization_id} — authorize GitHub at the org level first."
+        )
     return get_github_connection()
 
 
