@@ -1,4 +1,3 @@
-import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getAccessibleProjectIds, requireWorkspaceRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
@@ -14,18 +13,7 @@ import {
   getSourcesSummary,
 } from '@/lib/dashboard';
 import { orgSizeLabel } from '@/lib/org-size';
-import { TakeTourButton } from '@/components/tour/take-tour-button';
-import { PipelineStepper } from '@/components/dashboard/pipeline-stepper';
-import { DashboardChecklistSection } from '@/components/dashboard/dashboard-checklist-section';
-import {
-  SourcesCardWithNav,
-  IntegrationsCardWithNav,
-} from '@/components/dashboard/dashboard-nav-actions';
-import { AwaitingReviewCard } from '@/components/dashboard/awaiting-review-card';
-import { RecentlyPublishedCard } from '@/components/dashboard/recently-published-card';
-import { QualityScoreCard } from '@/components/dashboard/quality-score-card';
-import { ActivityFeedCard } from '@/components/dashboard/activity-feed-card';
-import { UsageCard } from '@/components/dashboard/usage-card';
+import { DashboardClientShell } from '@/components/dashboard/dashboard-client-shell';
 import type { ChecklistItem } from '@/components/dashboard/onboarding-checklist';
 
 // Workspace dashboard (Onboarding Flow redesign) — replaces the flat
@@ -68,27 +56,20 @@ export default async function WorkspaceDashboardPage({
       getWorkspaceUsageSummary(workspaceId),
     ]);
 
-  // Placeholder targets until PR 5 adds real modals — the checklist tiles and
-  // header buttons route into the existing project-scoped pages. Resolving
-  // (or lazily creating) a default project only when actually needed avoids
-  // writing to the DB on every dashboard view.
+  // Resolving (or lazily creating) a default project only when actually
+  // needed avoids writing to the DB on every dashboard view — the Add Source
+  // modal needs a projectId to post sources against (Source has no
+  // workspace-level home in the schema).
   const canCreate = access.membership.role !== 'VIEWER';
   const defaultProjectId = canCreate
     ? await getOrCreateDefaultProjectId(workspaceId, workspace.name)
     : null;
-  const addSourceHref = defaultProjectId
-    ? `/workspaces/${workspaceId}/projects/${defaultProjectId}/sources`
-    : `/workspaces/${workspaceId}`;
-  const connectHref = defaultProjectId
-    ? `/workspaces/${workspaceId}/projects/${defaultProjectId}/get-started`
-    : `/workspaces/${workspaceId}`;
   const reviewHref = defaultProjectId
     ? `/workspaces/${workspaceId}/projects/${defaultProjectId}/review`
     : null;
-  const inviteHref = `/workspaces/${workspaceId}/invite`;
 
   const anyConnected = integrations.some((i) => i.connected);
-  const invitesSent = false; // no cheap existing-invite check yet; refined once the Invite modal (PR 5) lands
+  const invitesSent = false; // no cheap existing-invite check yet; refined if the Invite modal needs a "done" signal later
   const checklistItems: ChecklistItem[] = [
     {
       key: 'tool',
@@ -118,69 +99,33 @@ export default async function WorkspaceDashboardPage({
   return (
     <div className="min-h-screen bg-paper px-6 py-10">
       <div className="mx-auto max-w-[1120px]">
-        <div className="mb-6 flex items-end justify-between gap-6">
-          <div>
-            {orgBreadcrumb ? (
-              <div className="mb-1.5 font-mono text-xs text-sub">{orgBreadcrumb}</div>
-            ) : null}
-            <h1 className="text-[34px] font-extrabold tracking-tight text-ink">{workspace.name}</h1>
-            <p className="mt-2 text-[15px] text-sub">{subtitle}</p>
-          </div>
-          <div className="flex items-center gap-2.5">
-            {canCreate ? <TakeTourButton /> : null}
-            {canCreate ? (
-              <>
-                <Link
-                  href={connectHref}
-                  className="rounded-md border border-line bg-panel px-4.5 py-3 text-sm font-semibold text-ink"
-                >
-                  Connect a tool
-                </Link>
-                <Link
-                  href={addSourceHref}
-                  className="rounded-md bg-cobalt px-5 py-3 text-sm font-bold text-white"
-                >
-                  + Add source
-                </Link>
-              </>
-            ) : null}
-            {access.membership.role === 'ADMIN' ? (
-              <Link
-                href={`/workspaces/${workspaceId}/billing`}
-                className="text-sm text-cobalt underline-offset-2 hover:underline"
-              >
-                Billing →
-              </Link>
-            ) : null}
-          </div>
+        <div className="mb-6">
+          {orgBreadcrumb ? (
+            <div className="mb-1.5 font-mono text-xs text-sub">{orgBreadcrumb}</div>
+          ) : null}
+          <h1 className="text-[34px] font-extrabold tracking-tight text-ink">{workspace.name}</h1>
+          <p className="mt-2 text-[15px] text-sub">{subtitle}</p>
         </div>
 
-        {canCreate ? (
-          <DashboardChecklistSection
-            workspaceId={workspaceId}
-            items={checklistItems}
-            dismissedInitially={workspace.onboardingChecklistDismissedAt !== null}
-            connectHref={connectHref}
-            addSourceHref={addSourceHref}
-            inviteHref={inviteHref}
-          />
-        ) : null}
-
-        <PipelineStepper pipeline={pipeline} />
-
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1.55fr_1fr] lg:items-start">
-          <div className="flex flex-col gap-5">
-            <SourcesCardWithNav recent={sources.recent} addSourceHref={addSourceHref} />
-            <AwaitingReviewCard summary={review} reviewHref={reviewHref} />
-            <RecentlyPublishedCard batches={published} />
-          </div>
-          <div className="flex flex-col gap-5">
-            <IntegrationsCardWithNav integrations={integrations} connectHref={connectHref} />
-            <QualityScoreCard summary={quality} />
-            <ActivityFeedCard activity={activity} />
-            <UsageCard usage={usage} />
-          </div>
-        </div>
+        <DashboardClientShell
+          workspaceId={workspaceId}
+          organizationId={workspace.organizationId}
+          canCreate={canCreate}
+          isAdmin={access.membership.role === 'ADMIN'}
+          billingHref={`/workspaces/${workspaceId}/billing`}
+          reviewHref={reviewHref}
+          pipeline={pipeline}
+          sources={sources}
+          review={review}
+          published={published}
+          quality={quality}
+          activity={activity}
+          integrations={integrations}
+          usage={usage}
+          checklistItems={checklistItems}
+          dismissedInitially={workspace.onboardingChecklistDismissedAt !== null}
+          defaultProjectId={defaultProjectId}
+        />
       </div>
     </div>
   );

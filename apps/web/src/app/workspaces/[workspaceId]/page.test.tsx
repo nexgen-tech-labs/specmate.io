@@ -12,7 +12,8 @@ vi.mock('next/navigation', () => ({
   notFound: () => {
     throw new Error('NOT_FOUND');
   },
-  useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), refresh: vi.fn(), replace: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 vi.mock('@/components/tour/tour-provider', () => ({
@@ -88,8 +89,8 @@ describe('WorkspaceDashboardPage', () => {
   it('does not show Connect a tool / Add source actions for a VIEWER', async () => {
     currentSession = { user: { id: viewer.id } };
     render(await WorkspaceDashboardPage({ params: params() }));
-    expect(screen.queryByRole('link', { name: /connect a tool/i })).toBeNull();
-    expect(screen.queryByRole('link', { name: /\+ add source/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /connect a tool/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /\+ add source/i })).toBeNull();
     // A VIEWER doesn't trigger the lazy default-project creation, so the
     // checklist also shouldn't render for them (no meaningful action to take).
     expect(screen.queryByText(/set up your workspace/i)).toBeNull();

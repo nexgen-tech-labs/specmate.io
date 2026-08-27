@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import Organization, OrgWizardSession
+from app.models import Connection, Organization, OrgWizardSession
 
 
 def _now() -> datetime:
@@ -82,10 +82,38 @@ async def _cleanup_async(organization_id: str) -> None:
             await session.execute(
                 delete(OrgWizardSession).where(OrgWizardSession.organizationId == organization_id)
             )
+            await session.execute(
+                delete(Connection).where(Connection.organizationId == organization_id)
+            )
             await session.execute(delete(Organization).where(Organization.id == organization_id))
             await session.commit()
     finally:
         await engine.dispose()
+
+
+async def _create_connection_async(organization_id: str, tool_key: str) -> str:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            now = _now()
+            conn = Connection(
+                organizationId=organization_id,
+                toolKey=tool_key,
+                authMethod="OAUTH",
+                createdAt=now,
+                updatedAt=now,
+            )
+            session.add(conn)
+            await session.flush()
+            conn_id = conn.id
+            await session.commit()
+            return conn_id
+    finally:
+        await engine.dispose()
+
+
+def _create_connection(organization_id: str, tool_key: str) -> str:
+    return asyncio.run(_create_connection_async(organization_id, tool_key))
 
 
 def _cleanup(organization_id: str) -> None:
@@ -230,6 +258,8 @@ def test_scope_options_returns_422_when_no_org_connection_exists() -> None:
 def test_scope_options_returns_discovered_projects_when_org_connection_resolves() -> None:
     organization_id = _create_organization()
     try:
+        connection_id = _create_connection(organization_id, "jira")
+
         from app.services.connectors.discovery_types import DiscoveryResult, ScopeOption
 
         fake_result = DiscoveryResult(
@@ -256,6 +286,7 @@ def test_scope_options_returns_discovered_projects_when_org_connection_resolves(
             res = client.get(f"/organizations/{organization_id}/connectors/jira/scope-options")
         assert res.status_code == 200
         body = res.json()
+        assert body["connection_id"] == connection_id
         assert body["scope_options"] == [{"id": "PAY", "label": "Payments (PAY)"}]
     finally:
         _cleanup(organization_id)

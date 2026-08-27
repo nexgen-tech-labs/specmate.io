@@ -15,6 +15,32 @@ interface ConnectorScopeBody {
 // workspace picks which board or repo it works against"). Lives in apps/web,
 // not apps/api, since workspace-membership authorization is apps/web's job —
 // matching the existing pattern for workspace-scoped writes.
+// Lists this workspace's already-picked connector scopes (e.g. "Jira ·
+// Payments (PAY)") — feeds the Add Source modal's "pull from connector"
+// dropdown, which needs the workspace's own scope picks, not the org-level
+// discovery options that /connectors/{tool}/scope-options returns.
+export async function GET(_request: Request, { params }: Params) {
+  const { workspaceId } = await params;
+  const access = await requireWorkspaceRole(workspaceId, ['ADMIN', 'REVIEWER', 'VIEWER']);
+  if (!access.ok) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: access.status });
+  }
+
+  const scopes = await prisma.workspaceConnectionScope.findMany({
+    where: { workspaceId },
+    include: { connection: { select: { toolKey: true } } },
+  });
+
+  return NextResponse.json({
+    scopes: scopes.map((s) => ({
+      connectionId: s.connectionId,
+      toolKey: s.connection.toolKey,
+      scopeValue: s.scopeValue,
+      scopeLabel: s.scopeLabel,
+    })),
+  });
+}
+
 export async function POST(request: Request, { params }: Params) {
   const { workspaceId } = await params;
   const access = await requireWorkspaceRole(workspaceId, ['ADMIN']);

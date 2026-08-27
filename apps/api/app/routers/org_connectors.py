@@ -130,6 +130,7 @@ class ScopeOptionResponse(BaseModel):
 
 
 class ScopeOptionsResponse(BaseModel):
+    connection_id: str
     scope_options: list[ScopeOptionResponse]
 
 
@@ -172,7 +173,18 @@ async def get_org_connector_scope_options(
     except Exception as exc:  # noqa: BLE001 — surfaced as a clean 502, not a raw crash
         raise HTTPException(status_code=502, detail=f"Scope discovery failed: {exc}") from exc
 
+    from app.models import Connection
+
+    connection_row = (
+        await session.execute(
+            select(Connection.id).where(
+                Connection.organizationId == organization_id, Connection.toolKey == tool_key
+            )
+        )
+    ).scalar_one()
+
     return ScopeOptionsResponse(
+        connection_id=connection_row,
         scope_options=[
             ScopeOptionResponse(id=o.id, label=o.label) for o in result.scope_options
         ]

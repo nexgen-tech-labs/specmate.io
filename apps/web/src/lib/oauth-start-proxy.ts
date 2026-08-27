@@ -19,12 +19,20 @@ import { NextResponse } from 'next/server';
 // straight there. The internal apps/api URL is never exposed to or touched
 // by the browser at any point.
 export async function proxyOAuthStart(request: Request, toolKey: string): Promise<NextResponse> {
-  const wizardSessionId = new URL(request.url).searchParams.get('wizard_session_id');
-  if (!wizardSessionId) {
-    return NextResponse.json({ error: 'wizard_session_id is required.' }, { status: 400 });
+  const searchParams = new URL(request.url).searchParams;
+  const wizardSessionId = searchParams.get('wizard_session_id');
+  const orgWizardSessionId = searchParams.get('org_wizard_session_id');
+  if (!wizardSessionId && !orgWizardSessionId) {
+    return NextResponse.json(
+      { error: 'wizard_session_id or org_wizard_session_id is required.' },
+      { status: 400 },
+    );
   }
 
-  const apiUrl = `${process.env.API_BASE_URL}/connectors/${toolKey}/oauth/start?wizard_session_id=${encodeURIComponent(wizardSessionId)}`;
+  const sessionParam = wizardSessionId
+    ? `wizard_session_id=${encodeURIComponent(wizardSessionId)}`
+    : `org_wizard_session_id=${encodeURIComponent(orgWizardSessionId!)}`;
+  const apiUrl = `${process.env.API_BASE_URL}/connectors/${toolKey}/oauth/start?${sessionParam}`;
   const apiResponse = await fetch(apiUrl, { redirect: 'manual' });
 
   const location = apiResponse.headers.get('location');

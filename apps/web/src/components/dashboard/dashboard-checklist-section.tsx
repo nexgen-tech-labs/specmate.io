@@ -1,31 +1,27 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
 import { OnboardingChecklist, type ChecklistItem } from './onboarding-checklist';
 
 interface DashboardChecklistSectionProps {
   workspaceId: string;
   items: ChecklistItem[];
   dismissedInitially: boolean;
-  connectHref: string;
-  addSourceHref: string;
-  inviteHref: string;
+  onSelectConnectTool: () => void;
+  onSelectAddSource: () => void;
+  onSelectInvite: () => void;
 }
 
 // Owns the checklist's dismiss side-effect (persisted server-side) — the
-// checklist card itself stays a presentation component. Tile clicks navigate
-// to the existing project-scoped pages for now (PR 5 swaps these for real
-// modals opened in-place).
+// checklist card itself stays a presentation component. Tile clicks open the
+// matching modal via DashboardClientShell's lifted activeModal state.
 export function DashboardChecklistSection({
   workspaceId,
   items,
   dismissedInitially,
-  connectHref,
-  addSourceHref,
-  inviteHref,
+  onSelectConnectTool,
+  onSelectAddSource,
+  onSelectInvite,
 }: DashboardChecklistSectionProps) {
-  const router = useRouter();
-
   async function handleDismiss() {
     try {
       await fetch(`/api/workspaces/${workspaceId}/dismiss-checklist`, { method: 'POST' });
@@ -36,9 +32,9 @@ export function DashboardChecklistSection({
   }
 
   function handleSelect(key: ChecklistItem['key']) {
-    if (key === 'tool') router.push(connectHref);
-    if (key === 'source') router.push(addSourceHref);
-    if (key === 'invite') router.push(inviteHref);
+    if (key === 'tool') onSelectConnectTool();
+    if (key === 'source') onSelectAddSource();
+    if (key === 'invite') onSelectInvite();
   }
 
   return (

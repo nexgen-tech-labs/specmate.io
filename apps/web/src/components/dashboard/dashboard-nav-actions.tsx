@@ -1,32 +1,29 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
 import { SourcesCard } from './sources-card';
 import { IntegrationsCard } from './integrations-card';
 import type { IntegrationSummary, SourceSummaryItem } from '@/lib/dashboard';
 
-// Thin client wrappers around the presentation-only cards, since navigating
-// on click needs useRouter. Placeholder navigation to existing project-scoped
-// pages for now — PR 5 swaps these for real modals opened in-place.
+// Thin client wrappers around the presentation-only cards — PR 5 swaps their
+// former placeholder navigation for real modals opened in-place via
+// DashboardClientShell's lifted activeModal state.
 
 export function SourcesCardWithNav({
   recent,
-  addSourceHref,
+  onAddSource,
 }: {
   recent: SourceSummaryItem[];
-  addSourceHref: string;
+  onAddSource: () => void;
 }) {
-  const router = useRouter();
-  return <SourcesCard recent={recent} onAddSource={() => router.push(addSourceHref)} />;
+  return <SourcesCard recent={recent} onAddSource={onAddSource} />;
 }
 
 export function IntegrationsCardWithNav({
   integrations,
-  connectHref,
+  onManage,
 }: {
   integrations: IntegrationSummary[];
-  connectHref: string;
+  onManage: () => void;
 }) {
-  const router = useRouter();
-  return <IntegrationsCard integrations={integrations} onManage={() => router.push(connectHref)} />;
+  return <IntegrationsCard integrations={integrations} onManage={onManage} />;
 }
