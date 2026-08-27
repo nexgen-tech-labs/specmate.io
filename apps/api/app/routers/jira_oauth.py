@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_db_session
-from app.models import Connection, WizardSession
+from app.models import Connection, OrgWizardSession, WizardSession
 from app.services.connectors.jira_auth import (
     discover_accessible_jira_sites,
     exchange_oauth_code_for_tokens,
@@ -62,21 +62,92 @@ def _jira_redirect_uri() -> str:
 
 
 @router.get("/connectors/jira/oauth/start")
-async def start_jira_oauth(wizard_session_id: str) -> RedirectResponse:
+async def start_jira_oauth(
+    wizard_session_id: str | None = None, org_wizard_session_id: str | None = None
+) -> RedirectResponse:
+    if (wizard_session_id is None) == (org_wizard_session_id is None):
+        raise HTTPException(
+            status_code=400, detail="Pass exactly one of wizard_session_id or org_wizard_session_id."
+        )
     if not settings.jira_oauth_app_client_id:
         raise HTTPException(status_code=503, detail="Jira OAuth App is not configured.")
+    # state carries whichever session id was passed — the callback disambiguates
+    # by which table's primary key actually matches (cuid collision across the
+    # two tables is not a practical concern).
+    state = wizard_session_id if wizard_session_id is not None else org_wizard_session_id
     params = urlencode(
         {
             "audience": "api.atlassian.com",
             "client_id": settings.jira_oauth_app_client_id,
             "scope": _JIRA_OAUTH_SCOPES,
             "redirect_uri": _jira_redirect_uri(),
-            "state": wizard_session_id,
+            "state": state,
             "response_type": "code",
             "prompt": "consent",
         }
     )
     return RedirectResponse(f"https://auth.atlassian.com/authorize?{params}")
+
+
+async def _upsert_connection(
+    session: AsyncSession,
+    *,
+    workspace_id: str | None,
+    organization_id: str | None,
+    encrypted: bytes,
+    scope: dict[str, object],
+    now: datetime,
+) -> None:
+    """Shared upsert-by-unique-constraint logic for both workspace- and
+    org-scoped Jira Connections — the token exchange and site discovery above
+    are identical either way; only the persistence target differs."""
+    scope_column = Connection.workspaceId if workspace_id is not None else Connection.organizationId
+    scope_id = workspace_id if workspace_id is not None else organization_id
+
+    existing = (
+        await session.execute(
+            select(Connection).where(scope_column == scope_id, Connection.toolKey == "jira")
+        )
+    ).scalar_one_or_none()
+    if existing:
+        existing.authMethod = "OAUTH"
+        existing.encryptedCredentials = encrypted
+        existing.scope = scope
+        existing.updatedAt = now
+        await session.commit()
+        return
+
+    # Two concurrent callbacks for the same `state` (e.g. a double-submitted
+    # OAuth redirect) can both reach this branch after both seeing no
+    # existing row — the unique constraint means only one INSERT wins. Fall
+    # back to updating the row the other request just created rather than
+    # surfacing an unhandled IntegrityError.
+    session.add(
+        Connection(
+            workspaceId=workspace_id,
+            organizationId=organization_id,
+            toolKey="jira",
+            authMethod="OAUTH",
+            encryptedCredentials=encrypted,
+            scope=scope,
+            createdAt=now,
+            updatedAt=now,
+        )
+    )
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        winner = (
+            await session.execute(
+                select(Connection).where(scope_column == scope_id, Connection.toolKey == "jira")
+            )
+        ).scalar_one()
+        winner.authMethod = "OAUTH"
+        winner.encryptedCredentials = encrypted
+        winner.scope = scope
+        winner.updatedAt = now
+        await session.commit()
 
 
 @router.get("/connectors/jira/oauth/callback")
@@ -85,9 +156,15 @@ async def jira_oauth_callback(
     state: str,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> RedirectResponse:
-    wizard_session = await session.get(WizardSession, state)
     now = _now()
-    if not wizard_session or wizard_session.expiresAt < now:
+    wizard_session = await session.get(WizardSession, state)
+    org_wizard_session = None if wizard_session else await session.get(OrgWizardSession, state)
+
+    if wizard_session and wizard_session.expiresAt < now:
+        raise HTTPException(status_code=404, detail="Wizard session not found or expired.")
+    if org_wizard_session and org_wizard_session.expiresAt < now:
+        raise HTTPException(status_code=404, detail="Org wizard session not found or expired.")
+    if not wizard_session and not org_wizard_session:
         raise HTTPException(status_code=404, detail="Wizard session not found or expired.")
 
     try:
@@ -111,63 +188,40 @@ async def jira_oauth_callback(
     encrypted = encrypt_credentials(credentials_json)
     scope: dict[str, object] = {"cloud_id": cloud_id, "cloud_url": sites[0].url}
 
-    existing = (
-        await session.execute(
-            select(Connection).where(
-                Connection.workspaceId == wizard_session.workspaceId,
-                Connection.toolKey == "jira",
-            )
+    if wizard_session:
+        await _upsert_connection(
+            session,
+            workspace_id=wizard_session.workspaceId,
+            organization_id=None,
+            encrypted=encrypted,
+            scope=scope,
+            now=now,
         )
-    ).scalar_one_or_none()
-    if existing:
-        existing.authMethod = "OAUTH"
-        existing.encryptedCredentials = encrypted
-        existing.scope = scope
-        existing.updatedAt = now
+        wizard_session = await session.get(WizardSession, state)
+        assert wizard_session is not None
         wizard_session.currentStep = "select_scope"
         await session.commit()
-    else:
-        # Two concurrent callbacks for the same `state` (e.g. a double-submitted
-        # OAuth redirect) can both reach this branch after both seeing no
-        # existing row — the @@unique([workspaceId, toolKey]) constraint means
-        # only one INSERT wins. Fall back to updating the row the other request
-        # just created rather than surfacing an unhandled IntegrityError.
-        session.add(
-            Connection(
-                workspaceId=wizard_session.workspaceId,
-                toolKey="jira",
-                authMethod="OAUTH",
-                encryptedCredentials=encrypted,
-                scope=scope,
-                createdAt=now,
-                updatedAt=now,
-            )
+        redirect_url = (
+            f"{settings.web_base_url}/workspaces/{wizard_session.workspaceId}"
+            f"/projects/{wizard_session.projectId}/connect/jira?oauth=success"
         )
-        wizard_session.currentStep = "select_scope"
-        workspace_id = wizard_session.workspaceId
-        try:
-            await session.commit()
-        except IntegrityError:
-            await session.rollback()
-            winner = (
-                await session.execute(
-                    select(Connection).where(
-                        Connection.workspaceId == workspace_id,
-                        Connection.toolKey == "jira",
-                    )
-                )
-            ).scalar_one()
-            winner.authMethod = "OAUTH"
-            winner.encryptedCredentials = encrypted
-            winner.scope = scope
-            winner.updatedAt = now
-            wizard_session = await session.get(WizardSession, state)
-            assert wizard_session is not None
-            wizard_session.currentStep = "select_scope"
-            await session.commit()
+        return RedirectResponse(redirect_url)
 
+    assert org_wizard_session is not None
+    await _upsert_connection(
+        session,
+        workspace_id=None,
+        organization_id=org_wizard_session.organizationId,
+        encrypted=encrypted,
+        scope=scope,
+        now=now,
+    )
+    org_wizard_session = await session.get(OrgWizardSession, state)
+    assert org_wizard_session is not None
+    org_wizard_session.currentStep = "confirm"
+    await session.commit()
     redirect_url = (
-        f"{settings.web_base_url}/workspaces/{wizard_session.workspaceId}"
-        f"/projects/{wizard_session.projectId}/connect/jira?oauth=success"
+        f"{settings.web_base_url}/organizations/{org_wizard_session.organizationId}"
+        f"/connect/jira?oauth=success"
     )
     return RedirectResponse(redirect_url)

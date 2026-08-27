@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import Connection, Project, WizardSession, Workspace
+from app.models import Connection, Organization, OrgWizardSession, Project, WizardSession, Workspace
 
 
 def _now() -> datetime:
@@ -236,6 +236,137 @@ def test_callback_with_expired_session_returns_404() -> None:
         assert _get_connection(ids["workspace_id"]) is None
     finally:
         _cleanup(ids)
+
+
+async def _create_org_wizard_session_async(expires_in_future: bool) -> dict[str, str]:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            org = Organization(name="Org OAuth Test Org", createdAt=_now(), updatedAt=_now())
+            session.add(org)
+            await session.flush()
+            delta = timedelta(hours=1) if expires_in_future else -timedelta(hours=1)
+            org_wizard_session = OrgWizardSession(
+                organizationId=org.id,
+                toolKey="github",
+                currentStep="authenticate",
+                collectedState={},
+                createdAt=_now(),
+                expiresAt=_now() + delta,
+            )
+            session.add(org_wizard_session)
+            await session.flush()
+            ids = {"organization_id": org.id, "org_wizard_session_id": org_wizard_session.id}
+            await session.commit()
+            return ids
+    finally:
+        await engine.dispose()
+
+
+def _create_org_wizard_session(expires_in_future: bool = True) -> dict[str, str]:
+    return asyncio.run(_create_org_wizard_session_async(expires_in_future))
+
+
+async def _cleanup_org_async(ids: dict[str, str]) -> None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            await session.execute(
+                delete(Connection).where(Connection.organizationId == ids["organization_id"])
+            )
+            await session.execute(
+                delete(OrgWizardSession).where(
+                    OrgWizardSession.organizationId == ids["organization_id"]
+                )
+            )
+            await session.execute(delete(Organization).where(Organization.id == ids["organization_id"]))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+def _cleanup_org(ids: dict[str, str]) -> None:
+    asyncio.run(_cleanup_org_async(ids))
+
+
+async def _get_org_connection_async(organization_id: str) -> Connection | None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            return (
+                await session.execute(
+                    select(Connection).where(
+                        Connection.organizationId == organization_id, Connection.toolKey == "github"
+                    )
+                )
+            ).scalar_one_or_none()
+    finally:
+        await engine.dispose()
+
+
+def _get_org_connection(organization_id: str) -> Connection | None:
+    return asyncio.run(_get_org_connection_async(organization_id))
+
+
+def test_start_org_oauth_redirects_to_github_with_org_session_as_state() -> None:
+    with patch.object(settings, "github_oauth_app_client_id", "test-client-id"):
+        client = TestClient(app, follow_redirects=False)
+        res = client.get(
+            "/connectors/github/oauth/start", params={"org_wizard_session_id": "org-abc123"}
+        )
+        assert res.status_code in (302, 307)
+        assert "state=org-abc123" in res.headers["location"]
+
+
+def test_org_callback_with_valid_session_creates_org_scoped_connection() -> None:
+    ids = _create_org_wizard_session()
+    try:
+        _dispose_app_engine()
+        client = TestClient(app, follow_redirects=False)
+        with (
+            patch.object(settings, "github_oauth_app_client_id", "test-client-id"),
+            patch.object(settings, "github_oauth_app_client_secret", "test-secret"),
+            patch.object(settings, "connector_dek_b64", "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="),
+            patch("httpx.AsyncClient.post", new=AsyncMock(return_value=_FakeTokenResponse())),
+        ):
+            res = client.get(
+                "/connectors/github/oauth/callback",
+                params={"code": "fake-code", "state": ids["org_wizard_session_id"]},
+            )
+        assert res.status_code in (302, 307)
+        location = res.headers["location"]
+        assert location.startswith(settings.web_base_url)
+        assert f"/organizations/{ids['organization_id']}/connect/github" in location
+        assert "oauth=success" in location
+
+        _dispose_app_engine()
+        conn = _get_org_connection(ids["organization_id"])
+        assert conn is not None
+        assert conn.workspaceId is None
+        assert conn.authMethod == "OAUTH"
+    finally:
+        _cleanup_org(ids)
+
+
+def test_org_callback_with_expired_session_returns_404() -> None:
+    ids = _create_org_wizard_session(expires_in_future=False)
+    try:
+        _dispose_app_engine()
+        client = TestClient(app)
+        with (
+            patch.object(settings, "github_oauth_app_client_id", "test-client-id"),
+            patch.object(settings, "github_oauth_app_client_secret", "test-secret"),
+        ):
+            res = client.get(
+                "/connectors/github/oauth/callback",
+                params={"code": "fake-code", "state": ids["org_wizard_session_id"]},
+            )
+        assert res.status_code == 404
+
+        _dispose_app_engine()
+        assert _get_org_connection(ids["organization_id"]) is None
+    finally:
+        _cleanup_org(ids)
 
 
 def test_callback_called_concurrently_results_in_exactly_one_connection() -> None:

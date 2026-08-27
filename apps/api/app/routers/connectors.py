@@ -23,7 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db_session
 from app.core.rate_limit import enforce_rate_limit
-from app.models import Project, PublishTarget, ReferenceItem, Source, SourceKind, SourceStatus
+from app.models import Project, PublishTarget, ReferenceItem, Source, SourceKind, SourceStatus, Workspace
+from app.services.parsing.types import ParsedChunk
 from app.routers.sources import replace_raw_requirements
 from app.services.connectors.ado import fetch_ado_work_items
 from app.services.connectors.confluence import (
@@ -33,6 +34,7 @@ from app.services.connectors.confluence import (
 )
 from app.services.connectors.github import fetch_github_issues
 from app.services.connectors.jira import fetch_jira_issues
+from app.services.connectors.jira_auth import get_jira_connection, resolve_jira_connection
 from app.services.connectors.registry import CONNECTOR_REGISTRY
 from app.services.connectors.slack import (
     fetch_slack_messages,
@@ -46,11 +48,18 @@ router = APIRouter()
 ReferenceFetcher = Callable[[str], Awaitable[list[ReferenceItemData]]]
 
 
+async def _fetch_jira_issues_env_configured(project_key: str) -> list[ReferenceItemData]:
+    """Adapter preserving this endpoint's original single-tenant env-configured
+    behavior — fetch_jira_issues itself is now connection-agnostic (Onboarding
+    Flow redesign, so the same fetch serves org-level OAuth pulls too)."""
+    return await fetch_jira_issues(get_jira_connection(), project_key)
+
+
 @dataclass
 class ConnectorFetchers:
     reference: dict[PublishTarget, ReferenceFetcher] = field(
         default_factory=lambda: {
-            PublishTarget.JIRA: fetch_jira_issues,
+            PublishTarget.JIRA: _fetch_jira_issues_env_configured,
             PublishTarget.ADO: fetch_ado_work_items,
             PublishTarget.GITHUB: fetch_github_issues,
         }
@@ -212,6 +221,65 @@ async def sync_confluence_page(
 
     source = await _upsert_content_source(
         session, body.project_id, f"confluence:{page_id}", page.title, SourceKind.CONFLUENCE
+    )
+    await replace_raw_requirements(session, source.id, chunks)
+    source.status = SourceStatus.PARSED
+    source.parseError = None
+    source.updatedAt = _now()
+    await session.commit()
+
+    return ContentSyncResponse(
+        source_id=source.id,
+        name=source.name,
+        status=SourceStatus.PARSED.value,
+        chunk_count=len(chunks),
+    )
+
+
+class ConnectorSourceSyncBody(BaseModel):
+    remote: str  # Jira: project key; ADO: project name; GitHub: "owner/repo".
+
+
+@router.post("/projects/{project_id}/sources/from-connector/{tool}")
+async def sync_connector_backlog_as_source(
+    project_id: str,
+    tool: str,
+    body: ConnectorSourceSyncBody,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ContentSyncResponse:
+    """Materializes a connector's existing backlog as a Source (Onboarding Flow
+    redesign's "pull from a connected tool" ingestion option) — reuses the same
+    _upsert_content_source + replace_raw_requirements pattern as Confluence sync,
+    just fed from the org-level connector's issue list instead of a wiki page."""
+    if tool != "jira":
+        raise HTTPException(
+            status_code=404, detail=f"'{tool}' backlog-as-source is not yet supported."
+        )
+
+    project = await session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    await enforce_rate_limit(session, project.workspaceId)
+
+    workspace = await session.get(Workspace, project.workspaceId)
+    if workspace is None or workspace.organizationId is None:
+        raise HTTPException(
+            status_code=400, detail="This workspace has no organization — connect a tool at the org level first."
+        )
+
+    try:
+        connection = await resolve_jira_connection(session, organization_id=workspace.organizationId)
+        issues = await fetch_jira_issues(connection, body.remote)
+    except ConnectorError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    chunks = [
+        ParsedChunk(text=f"{item.title}\n\n{item.description}".strip(), section_path=item.external_key, order=i)
+        for i, item in enumerate(issues)
+    ]
+
+    source = await _upsert_content_source(
+        session, project_id, f"jira:{body.remote}", f"{body.remote} project · existing backlog", SourceKind.JIRA_REF
     )
     await replace_raw_requirements(session, source.id, chunks)
     source.status = SourceStatus.PARSED

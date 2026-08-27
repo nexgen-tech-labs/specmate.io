@@ -1,13 +1,14 @@
 """Jira Cloud backlog connector (Issue #14) — read-only pull of a project's issues
-as ReferenceItems. Auth: Atlassian email + API token (shared with the Confluence
-connector; the same credentials also serve Epic 5's publishing connector later).
-No OAuth/per-workspace connection store yet — see architecture.md."""
+as ReferenceItems (and, per the Onboarding Flow redesign, as a materialized Source
+for the "pull from a connected tool" ingestion path). Accepts any JiraConnection
+(env-configured, workspace-OAuth, or org-OAuth — see jira_auth.py) rather than
+reading settings directly, so this one implementation serves every auth mode."""
 
 from __future__ import annotations
 
 import httpx
 
-from app.core.config import settings
+from app.services.connectors.jira_auth import JiraConnection
 from app.services.connectors.types import ConnectorError, ReferenceItemData
 
 _PAGE_SIZE = 100
@@ -32,7 +33,7 @@ def _adf_to_text(node: object) -> str:
     return ""
 
 
-def _issue_to_reference_item(issue: dict[str, object]) -> ReferenceItemData:
+def _issue_to_reference_item(issue: dict[str, object], base_url: str) -> ReferenceItemData:
     fields = issue.get("fields") or {}
     assert isinstance(fields, dict)
     issue_type = fields.get("issuetype") or {}
@@ -44,22 +45,16 @@ def _issue_to_reference_item(issue: dict[str, object]) -> ReferenceItemData:
         description=_adf_to_text(fields.get("description")).strip(),
         item_type=str(issue_type.get("name", "") if isinstance(issue_type, dict) else ""),
         state=str(status.get("name", "") if isinstance(status, dict) else ""),
-        url=f"{settings.jira_base_url}/browse/{key}" if settings.jira_base_url else None,
+        url=f"{base_url}/browse/{key}" if base_url else None,
     )
 
 
-async def fetch_jira_issues(project_key: str) -> list[ReferenceItemData]:
-    if not (settings.jira_base_url and settings.atlassian_email and settings.atlassian_api_token):
-        raise ConnectorError(
-            "Jira connector is not configured — set JIRA_BASE_URL, ATLASSIAN_EMAIL, "
-            "and ATLASSIAN_API_TOKEN."
-        )
-
+async def fetch_jira_issues(connection: JiraConnection, project_key: str) -> list[ReferenceItemData]:
     items: list[ReferenceItemData] = []
     next_page_token: str | None = None
-    auth = (settings.atlassian_email, settings.atlassian_api_token)
+    base_url = connection.base_url()
 
-    async with httpx.AsyncClient(auth=auth, timeout=30) as client:
+    async with httpx.AsyncClient(auth=connection.auth(), timeout=30) as client:
         while True:
             params: dict[str, str | int] = {
                 "jql": f'project = "{project_key}" ORDER BY key ASC',
@@ -70,7 +65,7 @@ async def fetch_jira_issues(project_key: str) -> list[ReferenceItemData]:
                 params["nextPageToken"] = next_page_token
             try:
                 response = await client.get(
-                    f"{settings.jira_base_url}/rest/api/3/search/jql", params=params
+                    f"{base_url}/rest/api/{connection.api_version()}/search/jql", params=params
                 )
                 response.raise_for_status()
             except httpx.HTTPError as exc:
@@ -78,7 +73,7 @@ async def fetch_jira_issues(project_key: str) -> list[ReferenceItemData]:
 
             payload = response.json()
             for issue in payload.get("issues", []):
-                items.append(_issue_to_reference_item(issue))
+                items.append(_issue_to_reference_item(issue, base_url))
 
             next_page_token = payload.get("nextPageToken")
             if not next_page_token or payload.get("isLast", True):
