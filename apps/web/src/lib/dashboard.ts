@@ -94,6 +94,10 @@ export interface SourceSummaryItem {
   kind: string;
   status: string;
   createdAt: Date;
+  // Needed client-side to build the DELETE .../sources/[sourceId] URL — the
+  // dashboard aggregates sources across every accessible project, so unlike
+  // the project-scoped sources page, projectId isn't implicit from the route.
+  projectId: string;
 }
 
 export async function getSourcesSummary(
@@ -108,7 +112,7 @@ export async function getSourcesSummary(
       where: { deletedAt: null, ...where },
       orderBy: { createdAt: 'desc' },
       take,
-      select: { id: true, name: true, kind: true, status: true, createdAt: true },
+      select: { id: true, name: true, kind: true, status: true, createdAt: true, projectId: true },
     }),
   ]);
   return { total, recent };

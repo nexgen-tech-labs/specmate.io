@@ -24,9 +24,16 @@ const STATUS_COLOR: Record<string, string> = {
 interface SourcesCardProps {
   recent: SourceSummaryItem[];
   onAddSource: () => void;
+  onRemoveSource: (source: SourceSummaryItem) => void;
+  removingId?: string | null;
 }
 
-export function SourcesCard({ recent, onAddSource }: SourcesCardProps) {
+export function SourcesCard({
+  recent,
+  onAddSource,
+  onRemoveSource,
+  removingId = null,
+}: SourcesCardProps) {
   return (
     <section className="rounded-xl border border-line bg-panel p-6">
       <div className="mb-4.5 flex items-center justify-between">
@@ -45,8 +52,21 @@ export function SourcesCard({ recent, onAddSource }: SourcesCardProps) {
       {recent.length > 0 ? (
         <div className="grid grid-cols-2 gap-3">
           {recent.map((source) => (
-            <div key={source.id} className="rounded-[10px] border border-line bg-panel p-4">
-              <div className="mb-3 flex items-center justify-between">
+            <div
+              key={source.id}
+              className="group relative rounded-[10px] border border-line bg-panel p-4"
+            >
+              <button
+                type="button"
+                onClick={() => onRemoveSource(source)}
+                disabled={removingId === source.id}
+                aria-label={`Remove ${source.name}`}
+                title="Remove source"
+                className="absolute top-2 right-2 hidden h-5 w-5 items-center justify-center rounded-full border-none bg-paper text-xs leading-none text-sub group-hover:flex hover:text-red disabled:opacity-50"
+              >
+                {removingId === source.id ? '…' : '✕'}
+              </button>
+              <div className="mb-3 flex items-center justify-between pr-5">
                 <span className="text-sm text-ink">{KIND_GLYPH[source.kind] ?? '▤'}</span>
                 <span
                   className={`font-mono text-[11px] tracking-[0.06em] ${STATUS_COLOR[source.status] ?? 'text-sub'}`}
