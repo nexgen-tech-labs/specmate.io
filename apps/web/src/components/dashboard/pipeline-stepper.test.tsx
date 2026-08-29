@@ -1,0 +1,91 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { PipelineStepper } from './pipeline-stepper';
+import type { PipelineSummary } from '@/lib/dashboard';
+
+const refresh = vi.fn();
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ push: vi.fn(), refresh }),
+}));
+
+const EMPTY_PIPELINE: PipelineSummary = {
+  activeKey: 'ingest',
+  stages: [
+    { key: 'ingest', label: 'Ingest sources', count: 0, unit: 'sources' },
+    { key: 'generation', label: 'AI generation', count: 0, unit: 'drafted' },
+    { key: 'review', label: 'Human review', count: 0, unit: 'to approve' },
+    { key: 'publish', label: 'Publish to tools', count: 0, unit: 'items live' },
+    { key: 'audit', label: 'Audit & sync', count: 0, unit: 'in sync' },
+  ],
+};
+
+const WITH_SOURCE_PIPELINE: PipelineSummary = {
+  ...EMPTY_PIPELINE,
+  stages: EMPTY_PIPELINE.stages.map((s) => (s.key === 'ingest' ? { ...s, count: 1 } : s)),
+};
+
+describe('PipelineStepper generate action', () => {
+  beforeEach(() => {
+    refresh.mockClear();
+    vi.unstubAllGlobals();
+  });
+
+  it('does not show a Generate button when there are no sources yet', () => {
+    render(
+      <PipelineStepper pipeline={EMPTY_PIPELINE} workspaceId="ws-1" defaultProjectId="proj-1" />,
+    );
+    expect(screen.queryByRole('button', { name: /generate/i })).toBeNull();
+  });
+
+  it('does not show a Generate button for a VIEWER (no defaultProjectId)', () => {
+    render(
+      <PipelineStepper
+        pipeline={WITH_SOURCE_PIPELINE}
+        workspaceId="ws-1"
+        defaultProjectId={null}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /generate/i })).toBeNull();
+  });
+
+  it('shows a Generate button once a source exists, and triggers /generate on click', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ run_id: 'r1', stats: {} }) }),
+    );
+    render(
+      <PipelineStepper
+        pipeline={WITH_SOURCE_PIPELINE}
+        workspaceId="ws-1"
+        defaultProjectId="proj-1"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }));
+
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/workspaces/ws-1/projects/proj-1/generate',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('shows an error and does not refresh when generation fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, json: async () => ({ detail: 'AI service down' }) }),
+    );
+    render(
+      <PipelineStepper
+        pipeline={WITH_SOURCE_PIPELINE}
+        workspaceId="ws-1"
+        defaultProjectId="proj-1"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }));
+
+    await waitFor(() => expect(screen.getByText('AI service down')).toBeDefined());
+    expect(refresh).not.toHaveBeenCalled();
+  });
+});

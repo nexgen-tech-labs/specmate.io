@@ -56,4 +56,51 @@ describe('Stepper', () => {
     );
     expect(screen.queryByText('WORKSPACE TOTALS · LIVE')).toBeNull();
   });
+
+  it('renders a per-step action button and calls its own onClick without triggering onSelect', () => {
+    const onSelect = vi.fn();
+    const onAction = vi.fn();
+    render(
+      <Stepper
+        variant="pipeline"
+        steps={[
+          {
+            key: 'a',
+            label: 'AI generation',
+            meta: { count: 0, unit: 'drafted' },
+            action: { label: 'Generate', onClick: onAction },
+          },
+        ]}
+        currentKey="a"
+        onSelect={onSelect}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
+    expect(onAction).toHaveBeenCalledTimes(1);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('shows the action loadingLabel and disables it while loading', () => {
+    render(
+      <Stepper
+        variant="pipeline"
+        steps={[
+          {
+            key: 'a',
+            label: 'AI generation',
+            action: {
+              label: 'Generate',
+              onClick: vi.fn(),
+              loading: true,
+              loadingLabel: 'Generating…',
+            },
+          },
+        ]}
+        currentKey="a"
+      />,
+    );
+    const button = screen.getByRole('button', { name: 'Generating…' });
+    expect(button).toBeDisabled();
+  });
 });

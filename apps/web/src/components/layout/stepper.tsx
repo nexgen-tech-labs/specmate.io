@@ -5,6 +5,17 @@ export interface StepperStep {
    * the default "compact" variant, or a {count, unit} pair rendered as a
    * large number in the "pipeline" variant (see PipelineStepper). */
   meta?: string | { count: number; unit: string };
+  /** Optional per-step CTA rendered under the meta — pipeline variant only
+   * (e.g. "Generate" on the AI-generation stage). Its own click handler, so
+   * it works independently of the card's onSelect (which would otherwise
+   * fire too, since the CTA sits inside the same clickable card). */
+  action?: {
+    label: string;
+    onClick: () => void;
+    disabled?: boolean;
+    loading?: boolean;
+    loadingLabel?: string;
+  };
 }
 
 interface StepperProps {
@@ -43,12 +54,15 @@ export function Stepper({
         >
           {steps.map((s, i) => {
             const isCurrent = i === currentIndex;
-            const Tag = onSelect ? 'button' : 'div';
+            // A step with its own action button can't also be a <button>
+            // itself (nested buttons are invalid HTML / a hydration error) —
+            // fall back to a plain clickable div in that case.
+            const Tag = onSelect && !s.action ? 'button' : 'div';
             const meta = typeof s.meta === 'object' ? s.meta : undefined;
             return (
               <Tag
                 key={s.key}
-                onClick={onSelect ? () => onSelect(i) : undefined}
+                onClick={onSelect && !s.action ? () => onSelect(i) : undefined}
                 className={`border-r border-b-[3px] border-line px-5.5 py-5 text-left last:border-r-0 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-cobalt ${
                   isCurrent ? 'border-b-cobalt bg-panel' : 'border-b-transparent bg-paper'
                 }`}
@@ -70,6 +84,19 @@ export function Stepper({
                     </span>
                     <span className="text-xs text-sub">{meta.unit}</span>
                   </div>
+                ) : null}
+                {s.action ? (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      s.action?.onClick();
+                    }}
+                    disabled={s.action.disabled || s.action.loading}
+                    className="mt-3 rounded-md bg-cobalt px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50"
+                  >
+                    {s.action.loading ? (s.action.loadingLabel ?? 'Working…') : s.action.label}
+                  </button>
                 ) : null}
               </Tag>
             );

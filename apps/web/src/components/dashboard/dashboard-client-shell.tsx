@@ -141,7 +141,11 @@ export function DashboardClientShell({
         />
       ) : null}
 
-      <PipelineStepper pipeline={pipeline} />
+      <PipelineStepper
+        pipeline={pipeline}
+        workspaceId={workspaceId}
+        defaultProjectId={defaultProjectId}
+      />
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1.55fr_1fr] lg:items-start">
         <div className="flex flex-col gap-5">
