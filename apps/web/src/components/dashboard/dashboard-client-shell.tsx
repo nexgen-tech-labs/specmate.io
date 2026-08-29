@@ -180,6 +180,7 @@ export function DashboardClientShell({
           organizationId={organizationId}
           workspaceId={workspaceId}
           initialToolKey={connectInitialTool}
+          defaultProjectId={defaultProjectId}
           onClose={closeModal}
         />
       ) : null}

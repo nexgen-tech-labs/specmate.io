@@ -63,6 +63,35 @@ _DEFAULT_PUBLISHABLE_TYPES = {
 
 
 async def _resolve_connection(session: AsyncSession, workspace_id: str) -> GitHubConnection:
+    """Prefers a workspace-scoped Connection, then the workspace's
+    organization-level Connection (Onboarding Flow redesign's org-level
+    Connect flow), then the single-tenant env-configured fallback — mirrors
+    publish.py's Jira _resolve_connection fix for the identical gap."""
+    from app.models import Connection
+
+    has_workspace_connection = (
+        await session.execute(
+            select(Connection.id).where(
+                Connection.workspaceId == workspace_id, Connection.toolKey == "github"
+            )
+        )
+    ).scalar_one_or_none()
+    if has_workspace_connection is not None:
+        return await resolve_github_connection(session, workspace_id)
+
+    workspace = await session.get(Workspace, workspace_id)
+    if workspace and workspace.organizationId:
+        has_org_connection = (
+            await session.execute(
+                select(Connection.id).where(
+                    Connection.organizationId == workspace.organizationId,
+                    Connection.toolKey == "github",
+                )
+            )
+        ).scalar_one_or_none()
+        if has_org_connection is not None:
+            return await resolve_github_connection(session, organization_id=workspace.organizationId)
+
     return await resolve_github_connection(session, workspace_id)
 
 

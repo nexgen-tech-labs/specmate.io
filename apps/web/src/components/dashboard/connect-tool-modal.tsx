@@ -21,16 +21,23 @@ export function ConnectToolModal({
   /** Set when reopened after an OAuth return (?connect_tool=X&oauth=success)
    * — skips the tool picker and jumps straight to the scope step. */
   initialToolKey,
+  /** The project publish-mapping is saved against — same default-project
+   * resolution as Add Source/Generate. Null for a VIEWER; the scope step
+   * still records the workspace's board/repo pick either way, but publishing
+   * won't work until an ADMIN confirms a scope with a real project to map. */
+  defaultProjectId,
 }: {
   organizationId: string;
   workspaceId: string;
   onClose: () => void;
   initialToolKey?: string;
+  defaultProjectId: string | null;
 }) {
   const router = useRouter();
   const [step, setStep] = useState<Step>(initialToolKey ? 'scope' : 'pick');
   const [toolKey, setToolKey] = useState<string | null>(initialToolKey ?? null);
   const [error, setError] = useState<string | null>(null);
+  const [mappingWarning, setMappingWarning] = useState<string | null>(null);
 
   async function startAuthorize(tool: string) {
     setToolKey(tool);
@@ -69,8 +76,12 @@ export function ConnectToolModal({
         <ScopePicker
           organizationId={organizationId}
           workspaceId={workspaceId}
+          projectId={defaultProjectId}
           toolKey={toolKey}
-          onDone={() => setStep('confirm')}
+          onDone={(warning) => {
+            setMappingWarning(warning);
+            setStep('confirm');
+          }}
         />
       ) : null}
       {step === 'confirm' ? (
@@ -78,6 +89,7 @@ export function ConnectToolModal({
           <p className="text-sm text-ink">
             {toolKey ? TOOL_LABEL[toolKey] : 'This tool'} is connected for this workspace.
           </p>
+          {mappingWarning ? <p className="mt-3 text-sm text-red">{mappingWarning}</p> : null}
           <button
             type="button"
             onClick={() => {
@@ -124,13 +136,15 @@ function ToolPicker({ onPick, error }: { onPick: (tool: string) => void; error: 
 function ScopePicker({
   organizationId,
   workspaceId,
+  projectId,
   toolKey,
   onDone,
 }: {
   organizationId: string;
   workspaceId: string;
+  projectId: string | null;
   toolKey: string;
-  onDone: () => void;
+  onDone: (mappingWarning: string | null) => void;
 }) {
   const [options, setOptions] = useState<ScopeOption[] | null>(null);
   const [connectionId, setConnectionId] = useState<string | null>(null);
@@ -183,7 +197,36 @@ function ScopePicker({
         setError(body.error ?? 'Could not save your selection.');
         return;
       }
-      onDone();
+
+      // Publishing needs a project-level PublishMapping (remote_project +
+      // type map), a separate concept from the workspace's scope pick above
+      // — create/refresh it now so publishing works immediately, with no
+      // separate manual step through the old per-project connector settings
+      // page. Best-effort: the org connection + workspace scope are already
+      // saved at this point, so a mapping failure here (e.g. no project yet)
+      // surfaces as a warning, not a blocker to calling this tool "connected."
+      if (projectId && (toolKey === 'jira' || toolKey === 'github')) {
+        const mappingRes = await fetch(
+          `/api/workspaces/${workspaceId}/projects/${projectId}/publish-mapping/${toolKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ remote_project: option.id }),
+          },
+        );
+        if (!mappingRes.ok) {
+          const body = (await mappingRes.json().catch(() => ({}))) as {
+            error?: string;
+            detail?: string;
+          };
+          onDone(
+            body.detail ?? body.error ?? 'Connected, but publishing setup needs another look.',
+          );
+          return;
+        }
+      }
+
+      onDone(null);
     } catch {
       setError('Could not reach the server — try again.');
     } finally {

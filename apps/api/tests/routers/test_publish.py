@@ -22,6 +22,7 @@ from app.models import (
     AuditEvent,
     Connection,
     DraftItem,
+    Organization,
     Project,
     PublishedItem,
     PublishMapping,
@@ -720,6 +721,62 @@ async def _cleanup_connection(workspace_id: str) -> None:
         await engine.dispose()
 
 
+async def _attach_org_level_jira_connection(workspace_id: str) -> str:
+    """Onboarding Flow redesign shape: an org-level Connection (no
+    workspaceId), reached only via the workspace's organizationId — sets the
+    workspace's org and creates the Connection under it. Returns the
+    organization id for cleanup."""
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            now = _now()
+            org = Organization(name="Publish Org-Level Test Org", createdAt=now, updatedAt=now)
+            session.add(org)
+            await session.flush()
+            ws = await session.get(Workspace, workspace_id)
+            assert ws is not None
+            ws.organizationId = org.id
+            tokens = {
+                "access_token": "org-oauth-access-token",
+                "refresh_token": "org-oauth-refresh-token",
+                "expires_at": time.time() + 3600,
+            }
+            with patch.object(settings, "connector_dek_b64", _TEST_DEK_B64):
+                encrypted = encrypt_credentials(json.dumps(tokens))
+            org_id = org.id
+            session.add(
+                Connection(
+                    organizationId=org_id,
+                    toolKey="jira",
+                    authMethod="OAUTH",
+                    encryptedCredentials=encrypted,
+                    scope={"cloud_id": "org-cloud-id-xyz"},
+                    createdAt=now,
+                    updatedAt=now,
+                )
+            )
+            await session.commit()
+            return org_id
+    finally:
+        await engine.dispose()
+
+
+async def _cleanup_org_level_connection(workspace_id: str, organization_id: str) -> None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            await session.execute(
+                delete(Connection).where(Connection.organizationId == organization_id)
+            )
+            ws = await session.get(Workspace, workspace_id)
+            if ws is not None:
+                ws.organizationId = None
+            await session.execute(delete(Organization).where(Organization.id == organization_id))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
 def test_publish_with_stored_oauth_connection_uses_workspace_oauth_token() -> None:
     """Fast-follow to #101 Task 4: a workspace with a stored Jira OAuth Connection
     row publishes using resolve_jira_connection's OAuth path (not the env-configured
@@ -832,4 +889,62 @@ def test_publish_with_no_connection_row_keeps_env_configured_fallback() -> None:
     assert isinstance(connection, CloudTokenConnection)
     assert connection.url == "https://example.atlassian.net"
 
+    asyncio.run(_cleanup(ids))
+
+
+def test_publish_falls_back_to_org_level_connection_when_no_workspace_connection_exists() -> None:
+    """Onboarding Flow redesign regression guard: a workspace whose org
+    authorized Jira via the org-level "Connect a Tool" flow has no
+    workspace-scoped Connection row at all — only an org-level one, reached
+    through Workspace.organizationId. Without the _resolve_connection fix,
+    this fell straight through to the (unconfigured) env fallback and failed
+    with a confusing "Jira connection is not configured" even though the
+    org's Jira really is connected."""
+    ids = asyncio.run(_fixture())
+    organization_id = asyncio.run(_attach_org_level_jira_connection(ids["workspace_id"]))
+
+    fake = _FakeJira()
+    seen_connections: list[object] = []
+    original_gateway = fake.gateway
+
+    def gateway_with_connection_capture() -> PublishGateway:
+        gw = original_gateway()
+
+        async def capturing_create(conn: object, *args: object, **kwargs: object) -> PublishOutcome:
+            seen_connections.append(conn)
+            return await gw.create(conn, *args, **kwargs)  # type: ignore[misc]
+
+        from app.routers.publish import _resolve_connection
+
+        return PublishGateway(
+            connection=_resolve_connection,
+            projects=gw.projects,
+            meta=gw.meta,
+            create=capturing_create,
+            update=gw.update,
+            health=gw.health,
+        )
+
+    app.dependency_overrides[get_publish_gateway] = gateway_with_connection_capture
+    client = TestClient(app)
+    try:
+        with patch.object(settings, "connector_dek_b64", _TEST_DEK_B64):
+            _setup_mapping(client, ids["project_id"])
+            _dispose()
+            response = client.post(
+                f"/projects/{ids['project_id']}/publish/jira", json={"item_ids": [ids["epic_id"]]}
+            )
+    finally:
+        app.dependency_overrides.pop(get_publish_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    assert response.json()["succeeded"] == 1
+    assert len(seen_connections) == 1
+    connection = seen_connections[0]
+    assert isinstance(connection, JiraOAuthConnection)
+    assert connection.access_token == "org-oauth-access-token"
+    assert connection.cloud_id == "org-cloud-id-xyz"
+
+    asyncio.run(_cleanup_org_level_connection(ids["workspace_id"], organization_id))
     asyncio.run(_cleanup(ids))

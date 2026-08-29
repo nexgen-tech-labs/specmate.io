@@ -68,6 +68,41 @@ _DEFAULT_TYPE_SUGGESTIONS: dict[str, list[str]] = {
 
 
 async def _resolve_connection(session: AsyncSession, workspace_id: str) -> JiraConnection:
+    """Prefers a workspace-scoped Connection (the older per-workspace OAuth
+    flow), then the workspace's organization-level Connection (the Onboarding
+    Flow redesign's "authorize once, every workspace picks its own board" —
+    resolve_jira_connection has no way to check both in one call since it
+    requires exactly one of workspace_id/organization_id), then finally the
+    single-tenant env-configured fallback. Without this, publishing from a
+    workspace that only ever went through the org-level Connect flow — no
+    workspace-scoped Connection row exists — fell straight through to env
+    config and failed with a confusing "Jira connection is not configured"
+    even though the org's Jira really is connected."""
+    from app.models import Connection
+
+    has_workspace_connection = (
+        await session.execute(
+            select(Connection.id).where(
+                Connection.workspaceId == workspace_id, Connection.toolKey == "jira"
+            )
+        )
+    ).scalar_one_or_none()
+    if has_workspace_connection is not None:
+        return await resolve_jira_connection(session, workspace_id)
+
+    workspace = await session.get(Workspace, workspace_id)
+    if workspace and workspace.organizationId:
+        has_org_connection = (
+            await session.execute(
+                select(Connection.id).where(
+                    Connection.organizationId == workspace.organizationId,
+                    Connection.toolKey == "jira",
+                )
+            )
+        ).scalar_one_or_none()
+        if has_org_connection is not None:
+            return await resolve_jira_connection(session, organization_id=workspace.organizationId)
+
     return await resolve_jira_connection(session, workspace_id)
 
 

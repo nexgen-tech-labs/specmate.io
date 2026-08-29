@@ -18,7 +18,14 @@ describe('ConnectToolModal', () => {
   });
 
   it('shows Jira and GitHub as pickable, with a note that ADO connects per-workspace', () => {
-    render(<ConnectToolModal organizationId="org-1" workspaceId="ws-1" onClose={vi.fn()} />);
+    render(
+      <ConnectToolModal
+        organizationId="org-1"
+        workspaceId="ws-1"
+        defaultProjectId="proj-1"
+        onClose={vi.fn()}
+      />,
+    );
     expect(screen.getByRole('button', { name: 'Jira' })).toBeDefined();
     expect(screen.getByRole('button', { name: 'GitHub' })).toBeDefined();
     expect(screen.getByText(/azure devops connects per-workspace/i)).toBeDefined();
@@ -29,7 +36,14 @@ describe('ConnectToolModal', () => {
       'fetch',
       vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: 'org-wiz-1' }) }),
     );
-    render(<ConnectToolModal organizationId="org-1" workspaceId="ws-1" onClose={vi.fn()} />);
+    render(
+      <ConnectToolModal
+        organizationId="org-1"
+        workspaceId="ws-1"
+        defaultProjectId="proj-1"
+        onClose={vi.fn()}
+      />,
+    );
 
     fireEvent.click(screen.getByRole('button', { name: 'Jira' }));
 
@@ -60,6 +74,7 @@ describe('ConnectToolModal', () => {
         organizationId="org-1"
         workspaceId="ws-1"
         initialToolKey="jira"
+        defaultProjectId="proj-1"
         onClose={vi.fn()}
       />,
     );
@@ -68,7 +83,7 @@ describe('ConnectToolModal', () => {
     expect(screen.queryByRole('button', { name: 'Jira' })).toBeNull();
   });
 
-  it('confirms a scope selection by posting connectionId from scope-options, not the scope id', async () => {
+  it('confirms a scope selection, posting connectionId from scope-options and creating the publish mapping', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(async (url: string) => {
@@ -89,6 +104,7 @@ describe('ConnectToolModal', () => {
         organizationId="org-1"
         workspaceId="ws-1"
         initialToolKey="jira"
+        defaultProjectId="proj-1"
         onClose={vi.fn()}
       />,
     );
@@ -108,5 +124,83 @@ describe('ConnectToolModal', () => {
         }),
       }),
     );
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/workspaces/ws-1/projects/proj-1/publish-mapping/jira',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ remote_project: 'PAY' }),
+      }),
+    );
+    expect(screen.queryByText(/needs another look/i)).toBeNull();
+  });
+
+  it('skips creating a publish mapping when there is no default project (VIEWER)', async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes('scope-options')) {
+        return {
+          ok: true,
+          json: async () => ({
+            connection_id: 'conn-1',
+            scope_options: [{ id: 'PAY', label: 'Payments (PAY)' }],
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <ConnectToolModal
+        organizationId="org-1"
+        workspaceId="ws-1"
+        initialToolKey="jira"
+        defaultProjectId={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole('combobox')).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+
+    await waitFor(() => expect(screen.getByText(/is connected for this workspace/i)).toBeDefined());
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('publish-mapping'),
+      expect.anything(),
+    );
+  });
+
+  it('surfaces a non-blocking warning when the publish mapping fails to save', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('scope-options')) {
+          return {
+            ok: true,
+            json: async () => ({
+              connection_id: 'conn-1',
+              scope_options: [{ id: 'PAY', label: 'Payments (PAY)' }],
+            }),
+          };
+        }
+        if (url.includes('publish-mapping')) {
+          return { ok: false, json: async () => ({ detail: 'Jira connection is not configured' }) };
+        }
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+    render(
+      <ConnectToolModal
+        organizationId="org-1"
+        workspaceId="ws-1"
+        initialToolKey="jira"
+        defaultProjectId="proj-1"
+        onClose={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole('combobox')).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+
+    await waitFor(() => expect(screen.getByText(/is connected for this workspace/i)).toBeDefined());
+    expect(screen.getByText('Jira connection is not configured')).toBeDefined();
   });
 });
