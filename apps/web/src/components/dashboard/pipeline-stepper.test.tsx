@@ -4,8 +4,9 @@ import { PipelineStepper } from './pipeline-stepper';
 import type { PipelineSummary } from '@/lib/dashboard';
 
 const refresh = vi.fn();
+const push = vi.fn();
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: vi.fn(), refresh }),
+  useRouter: () => ({ push, refresh }),
 }));
 
 const EMPTY_PIPELINE: PipelineSummary = {
@@ -27,6 +28,7 @@ const WITH_SOURCE_PIPELINE: PipelineSummary = {
 describe('PipelineStepper generate action', () => {
   beforeEach(() => {
     refresh.mockClear();
+    push.mockClear();
     vi.unstubAllGlobals();
   });
 
@@ -87,5 +89,53 @@ describe('PipelineStepper generate action', () => {
 
     await waitFor(() => expect(screen.getByText('AI service down')).toBeDefined());
     expect(refresh).not.toHaveBeenCalled();
+  });
+});
+
+describe('PipelineStepper step navigation', () => {
+  beforeEach(() => {
+    refresh.mockClear();
+    push.mockClear();
+    vi.unstubAllGlobals();
+  });
+
+  it('navigates to the sources page when the Ingest sources card is clicked', () => {
+    render(
+      <PipelineStepper pipeline={EMPTY_PIPELINE} workspaceId="ws-1" defaultProjectId="proj-1" />,
+    );
+    fireEvent.click(screen.getByText('Ingest sources'));
+    expect(push).toHaveBeenCalledWith('/workspaces/ws-1/projects/proj-1/sources');
+  });
+
+  it('navigates to the review page when the Human review card is clicked', () => {
+    render(
+      <PipelineStepper pipeline={EMPTY_PIPELINE} workspaceId="ws-1" defaultProjectId="proj-1" />,
+    );
+    fireEvent.click(screen.getByText('Human review'));
+    expect(push).toHaveBeenCalledWith('/workspaces/ws-1/projects/proj-1/review');
+  });
+
+  it('navigates to the review page when the Publish to tools card is clicked (no dedicated publish page)', () => {
+    render(
+      <PipelineStepper pipeline={EMPTY_PIPELINE} workspaceId="ws-1" defaultProjectId="proj-1" />,
+    );
+    fireEvent.click(screen.getByText('Publish to tools'));
+    expect(push).toHaveBeenCalledWith('/workspaces/ws-1/projects/proj-1/review');
+  });
+
+  it('navigates to the audit page when the Audit & sync card is clicked', () => {
+    render(
+      <PipelineStepper pipeline={EMPTY_PIPELINE} workspaceId="ws-1" defaultProjectId="proj-1" />,
+    );
+    fireEvent.click(screen.getByText('Audit & sync'));
+    expect(push).toHaveBeenCalledWith('/workspaces/ws-1/projects/proj-1/audit');
+  });
+
+  it('does not navigate for a VIEWER (no defaultProjectId)', () => {
+    render(
+      <PipelineStepper pipeline={EMPTY_PIPELINE} workspaceId="ws-1" defaultProjectId={null} />,
+    );
+    fireEvent.click(screen.getByText('Human review'));
+    expect(push).not.toHaveBeenCalled();
   });
 });
