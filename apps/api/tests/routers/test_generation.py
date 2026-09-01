@@ -74,8 +74,12 @@ class FakeAdapter:
         # Pydantic copies dict fields on validation, so identity checks against the
         # schema constants fail — dispatch on the schema's top-level property instead.
         props = set(request.schema_.get("properties", {}))  # type: ignore[union-attr]
-        if props == {"clusters"}:
-            data: dict[str, object] = {"clusters": [{"theme": "Payments", "chunk_ids": c}]}
+        if props == {"digests"}:
+            data: dict[str, object] = {
+                "digests": [{"text": "Dense digest of a large source.", "source_chunk_ids": c}]
+            }
+        elif props == {"clusters"}:
+            data = {"clusters": [{"theme": "Payments", "chunk_ids": c}]}
         elif props == {"epics"}:
             data = {
                 "epics": [
@@ -220,6 +224,54 @@ async def _create_fixture() -> dict[str, object]:
                     createdAt=_now(), updatedAt=_now(),
                 )
             )
+            ids = {
+                "workspace_id": ws.id, "project_id": project.id,
+                "source_id": source.id, "chunk_ids": chunk_ids,
+            }
+            await session.commit()
+            return ids
+    finally:
+        await engine.dispose()
+
+
+async def _create_large_fixture() -> dict[str, object]:
+    """A source whose combined fragments block exceeds the summarization
+    character budget (FRAGMENTS_BLOCK_CHAR_BUDGET) — enough fragments, each
+    comfortably real-looking, to push well past it."""
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            ws = Workspace(name="Gen Large Test WS", createdAt=_now(), updatedAt=_now())
+            session.add(ws)
+            await session.flush()
+            project = Project(
+                workspaceId=ws.id, name="Gen Large Test Project", createdAt=_now(), updatedAt=_now()
+            )
+            session.add(project)
+            await session.flush()
+            source = Source(
+                projectId=project.id, name="big-reqs.docx", kind="DOCX",
+                storageKey="k", createdAt=_now(), updatedAt=_now(),
+            )
+            session.add(source)
+            await session.flush()
+
+            # Each fragment is ~500 chars; 120 of them comfortably exceeds the
+            # 45K character budget once bracketed ids/section paths are added.
+            chunk_ids: list[str] = []
+            for order in range(120):
+                fragment = RawRequirement(
+                    sourceId=source.id,
+                    text=f"Requirement fragment number {order}: " + ("detail " * 60),
+                    sectionPath=f"p.{order}",
+                    order=order,
+                    createdAt=_now(),
+                    updatedAt=_now(),
+                )
+                session.add(fragment)
+                await session.flush()
+                chunk_ids.append(fragment.id)
+
             ids = {
                 "workspace_id": ws.id, "project_id": project.id,
                 "source_id": source.id, "chunk_ids": chunk_ids,
@@ -562,6 +614,75 @@ def test_generate_downstream_sets_stage_complete_with_updated_timestamp() -> Non
     run = asyncio.run(fetch_run())
     assert run.stage == GenerationRunStage.COMPLETE
     assert run.updatedAt >= run.createdAt
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_with_large_fragments_triggers_summarization() -> None:
+    """A source whose combined fragments block exceeds the character budget
+    gets summarized before the epics passes see it — proven by a populated,
+    much-smaller-than-raw summarizedFragmentsBlock. (FakeAdapter bypasses
+    LoggingAdapter entirely, so AiCallLog assertions belong to the "real
+    composition" tests further down, not here — this test proves the
+    pipeline-level branch, not the logging integration.)"""
+    ids = asyncio.run(_create_large_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        response = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+
+    assert response.status_code == 200, response.text
+    run_id = response.json()["run_id"]
+
+    async def fetch_run() -> GenerationRun:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                run = await session.get(GenerationRun, run_id)
+                assert run is not None
+                return run
+        finally:
+            await engine.dispose()
+
+    run = asyncio.run(fetch_run())
+    assert run.summarizedFragmentsBlock is not None
+    assert run.summarizedFragmentsBlock != ""
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_with_small_fragments_skips_summarization() -> None:
+    """The common case — a small pasted requirement — never touches the
+    summarization path at all: no cached digest."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        response = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+
+    assert response.status_code == 200, response.text
+    run_id = response.json()["run_id"]
+
+    async def fetch_run() -> GenerationRun:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                run = await session.get(GenerationRun, run_id)
+                assert run is not None
+                return run
+        finally:
+            await engine.dispose()
+
+    run = asyncio.run(fetch_run())
+    assert run.summarizedFragmentsBlock is None
 
     asyncio.run(_cleanup(ids))
 

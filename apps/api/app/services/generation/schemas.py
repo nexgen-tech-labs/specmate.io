@@ -82,6 +82,26 @@ SUPPORTING_TYPES = [
     "QUESTION",
 ]
 
+SUMMARIZE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "digests": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "source_chunk_ids": _CHUNK_IDS,
+                },
+                "required": ["text", "source_chunk_ids"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["digests"],
+    "additionalProperties": False,
+}
+
 CLUSTER_SCHEMA: dict[str, object] = {
     "type": "object",
     "properties": {

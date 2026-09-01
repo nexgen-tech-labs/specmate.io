@@ -63,13 +63,20 @@ from app.services.ai.prompts.generation_v1 import (
     GENERATION_PROMPT_VERSION,
     SCORING_V1,
     STORIES_V1,
+    SUMMARIZE_FRAGMENTS_V1,
     SUPPORTING_V1,
+)
+from app.services.generation.chunking import (
+    digest_block,
+    group_fragments_for_summarization,
+    needs_summarization,
 )
 from app.services.generation.schemas import (
     CLUSTER_SCHEMA,
     EPICS_SCHEMA,
     SCORING_SCHEMA,
     STORIES_SCHEMA,
+    SUMMARIZE_SCHEMA,
     SUPPORTING_SCHEMA,
 )
 from app.services.generation.similarity import find_best_duplicate
@@ -258,6 +265,43 @@ async def _apply_duplicate_flags(
             }
 
 
+async def _maybe_summarize(
+    fragments: list[RawRequirement],
+    block: str,
+    adapter: AIAdapter,
+    workspace_id: str,
+    project_id: str,
+) -> str | None:
+    """If `block` exceeds the character budget, batches fragments and
+    summarizes each batch into a dense digest that still cites real fragment
+    ids — returns the replacement block, or None if summarization wasn't
+    needed (caller should fall back to the raw block in that case)."""
+    if not needs_summarization(block):
+        return None
+
+    fragment_ids = {f.id for f in fragments}
+    all_digests: list[dict[str, object]] = []
+    for batch in group_fragments_for_summarization(fragments):
+        batch_block = _fragments_block(batch)
+        result = await _call(
+            adapter,
+            "summarization",
+            SUMMARIZE_FRAGMENTS_V1,
+            f"Fragments:\n{batch_block}",
+            SUMMARIZE_SCHEMA,
+            workspace_id,
+            project_id,
+        )
+        for d in cast(list[dict[str, object]], result.get("digests", [])):
+            raw_ids = cast(list[str], d.get("source_chunk_ids", []))
+            filtered_ids = [c for c in raw_ids if c in fragment_ids]
+            if not filtered_ids:
+                continue  # anomaly: digest cites nothing real — drop it, never inject untraceable prose
+            all_digests.append({"text": d.get("text", ""), "source_chunk_ids": filtered_ids})
+
+    return digest_block(all_digests)
+
+
 async def generate_epics(
     project_id: str,
     session: AsyncSession,
@@ -295,8 +339,14 @@ async def generate_epics(
 
     fragment_ids = {f.id for f in fragments}
     fragment_source = {f.id: f.sourceId for f in fragments}
-    block = _fragments_block(fragments)
+    raw_block = _fragments_block(fragments)
     ws_id = project.workspaceId
+
+    # Chunking/summarization pre-pass (only for genuinely large sources — see
+    # chunking.py's character budget) — summarize once here, cache the digest
+    # on the run, and generate_downstream reuses it instead of re-summarizing.
+    summarized_block = await _maybe_summarize(fragments, raw_block, adapter, ws_id, project_id)
+    block = summarized_block or raw_block
 
     # Pass 1: cluster
     cluster_data = await _call(
@@ -336,6 +386,7 @@ async def generate_epics(
         contentHash=content_hash,
         promptVersion=GENERATION_PROMPT_VERSION,
         stage=GenerationRunStage.EPICS_PENDING_REVIEW,
+        summarizedFragmentsBlock=summarized_block,
     )
     session.add(run)
     await session.flush()
@@ -418,7 +469,11 @@ async def generate_downstream(
     fragments = await _fetch_fragments(project_id, session)
     fragment_ids = {f.id for f in fragments}
     fragment_source = {f.id: f.sourceId for f in fragments}
-    block = _fragments_block(fragments)
+    # Reuse the digest generate_epics already computed and cached (if
+    # summarization was triggered) rather than re-summarizing — avoids extra
+    # cost/latency and any risk of the two phases seeing different summaries
+    # of the same source.
+    block = run.summarizedFragmentsBlock or _fragments_block(fragments)
 
     # Pass 3: stories + tasks, scoped to approved epics only.
     epics_text = "\n".join(f"[{i}] {e.title}" for i, e in enumerate(epic_rows))

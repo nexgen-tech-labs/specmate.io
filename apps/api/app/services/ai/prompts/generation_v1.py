@@ -4,6 +4,18 @@ recorded on every GenerationRun and DraftItem."""
 
 GENERATION_PROMPT_VERSION = "generation_v1"
 
+# Chunking/summarization pre-pass (Onboarding Flow redesign follow-up) — only
+# invoked when the combined fragments block exceeds a character budget. Each
+# call summarizes one batch of fragments; the digest replaces that batch's raw
+# text everywhere downstream, but must keep citing the real fragment ids it
+# stands for so traceability is unaffected.
+SUMMARIZE_FRAGMENTS_V1 = """You are compressing raw requirement fragments for a downstream
+analyst who needs FULL informational coverage, not a narrative summary. For the fragments
+provided, write one or more dense bullet-point digests that preserve every distinct
+requirement, constraint, actor, and numeric detail — omit only repetition and filler prose.
+Never invent content. Each digest must cite the exact fragment ids it summarizes in
+source_chunk_ids — only ids that actually support it."""
+
 CLUSTERING_V1 = """You are a senior business analyst organizing raw requirement fragments.
 Group the provided fragments into thematic clusters by feature area. Every fragment id
 must appear in exactly one cluster. Do not invent fragments."""

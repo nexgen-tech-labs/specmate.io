@@ -22,6 +22,10 @@ class TaskModelConfig(BaseModel):
 
 TASK_MODELS: dict[str, TaskModelConfig] = {
     "extraction": TaskModelConfig(model=DEFAULT_MODEL, effort="low", max_tokens=4096),
+    # Chunking/summarization pre-pass for oversized sources — a dedicated task
+    # name (not reused from clustering/structuring) so its cost/latency is
+    # separately observable in AiCallLog and independently tunable.
+    "summarization": TaskModelConfig(model=DEFAULT_MODEL, effort="medium", max_tokens=8192),
     "clustering": TaskModelConfig(model=DEFAULT_MODEL, effort="medium", max_tokens=8192),
     # Generation passes emit every epic/story/supporting item for a project in one
     # structured response — size the budget for real document volumes, not demos.
