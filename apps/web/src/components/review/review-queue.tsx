@@ -73,6 +73,8 @@ export function ReviewQueue({
   activeFilters,
   totalItemCount,
   sourceCount,
+  latestRunId,
+  latestRunStage,
 }: {
   workspaceId: string;
   projectId: string;
@@ -83,6 +85,13 @@ export function ReviewQueue({
   activeFilters: { type?: string; status?: string; flagged?: string; sort?: string };
   totalItemCount: number;
   sourceCount: number;
+  /** Staged generation (Onboarding Flow redesign follow-up): while the
+   * latest run is EPICS_PENDING_REVIEW, `items` contains only epics — show a
+   * banner + "Generate stories & tasks" button instead of treating this like
+   * a normal fully-generated queue. Null once COMPLETE, or if no run exists
+   * yet (today's existing empty state below is unchanged in that case). */
+  latestRunId: string | null;
+  latestRunStage: string | null;
 }) {
   const router = useRouter();
   const base = `/api/workspaces/${workspaceId}/projects/${projectId}/draft-items`;
@@ -96,6 +105,35 @@ export function ReviewQueue({
   const [showDiff, setShowDiff] = useState(false);
   const [traceItemId, setTraceItemId] = useState<string | null>(null);
   const [flaggedIds, setFlaggedIds] = useState<Set<string>>(new Set());
+  const [generatingDownstream, setGeneratingDownstream] = useState(false);
+  const [downstreamError, setDownstreamError] = useState<string | null>(null);
+
+  const isPendingEpicReview = latestRunStage === 'EPICS_PENDING_REVIEW';
+  const approvedEpicCount = items.filter(
+    (i) => i.type === 'EPIC' && i.status === 'APPROVED',
+  ).length;
+
+  async function generateDownstream(): Promise<void> {
+    if (!latestRunId) return;
+    setGeneratingDownstream(true);
+    setDownstreamError(null);
+    try {
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/projects/${projectId}/generation-runs/${latestRunId}/generate-downstream`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
+        setDownstreamError(body.detail ?? body.error ?? 'Generation failed — try again.');
+        return;
+      }
+      router.refresh();
+    } catch {
+      setDownstreamError('Could not reach the generation service — try again.');
+    } finally {
+      setGeneratingDownstream(false);
+    }
+  }
 
   async function flagRemoved(itemId: string): Promise<void> {
     setBusy(true);
@@ -264,6 +302,26 @@ export function ReviewQueue({
           </span>
         ) : null}
       </div>
+
+      {isPendingEpicReview ? (
+        <div className="mb-4 rounded-md border border-cobalt bg-panel px-4 py-3 text-sm">
+          <p className="font-semibold text-ink">
+            {items.length} epic{items.length === 1 ? '' : 's'} generated. Approve the ones you want,
+            then generate their stories and tasks.
+          </p>
+          {downstreamError ? <p className="mt-1 text-sm text-red">{downstreamError}</p> : null}
+          {canReview ? (
+            <button
+              type="button"
+              disabled={approvedEpicCount === 0 || generatingDownstream}
+              onClick={() => void generateDownstream()}
+              className="mt-2 rounded bg-cobalt px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+            >
+              {generatingDownstream ? 'Generating…' : 'Generate stories & tasks'}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       {error ? <p className="mb-3 text-sm text-red">{error}</p> : null}
       {items.length === 0 ? (

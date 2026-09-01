@@ -1,9 +1,10 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
-import { ReviewQueue } from './review-queue';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { ReviewQueue, type ReviewItem } from './review-queue';
 
+const refresh = vi.fn();
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
+  useRouter: () => ({ push: vi.fn(), refresh }),
 }));
 
 function renderQueue(overrides: Partial<Parameters<typeof ReviewQueue>[0]> = {}) {
@@ -18,9 +19,33 @@ function renderQueue(overrides: Partial<Parameters<typeof ReviewQueue>[0]> = {})
       activeFilters={{}}
       totalItemCount={0}
       sourceCount={0}
+      latestRunId={null}
+      latestRunStage={null}
       {...overrides}
     />,
   );
+}
+
+function epicItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
+  return {
+    id: 'epic-1',
+    type: 'EPIC',
+    title: 'An epic',
+    description: 'desc',
+    status: 'PENDING',
+    qualityScore: null,
+    scoreDetail: null,
+    flags: null,
+    parentId: null,
+    signedOff: false,
+    originalDraft: null,
+    editHistory: [],
+    sources: [],
+    publishedKey: null,
+    publishedUrl: null,
+    duplicateReference: null,
+    ...overrides,
+  };
 }
 
 describe('ReviewQueue empty states', () => {
@@ -74,5 +99,91 @@ describe('ReviewQueue empty states', () => {
     });
     expect(screen.queryByText('No items match this filter.')).not.toBeInTheDocument();
     expect(screen.queryByText('This project has no sources yet.')).not.toBeInTheDocument();
+  });
+});
+
+describe('ReviewQueue staged-generation banner', () => {
+  beforeEach(() => {
+    refresh.mockClear();
+    vi.unstubAllGlobals();
+  });
+
+  it('shows the pending-review banner with a disabled button when no epic is approved yet', () => {
+    renderQueue({
+      latestRunId: 'run-1',
+      latestRunStage: 'EPICS_PENDING_REVIEW',
+      totalItemCount: 2,
+      items: [epicItem({ id: 'epic-1' }), epicItem({ id: 'epic-2', status: 'REJECTED' })],
+    });
+    expect(screen.getByText(/2 epics generated/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /generate stories & tasks/i })).toBeDisabled();
+  });
+
+  it('enables the button once at least one epic is approved, and calls generate-downstream then refreshes', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }));
+    renderQueue({
+      latestRunId: 'run-1',
+      latestRunStage: 'EPICS_PENDING_REVIEW',
+      totalItemCount: 2,
+      items: [
+        epicItem({ id: 'epic-1', status: 'APPROVED' }),
+        epicItem({ id: 'epic-2', status: 'REJECTED' }),
+      ],
+    });
+
+    const button = screen.getByRole('button', { name: /generate stories & tasks/i });
+    expect(button).not.toBeDisabled();
+    fireEvent.click(button);
+
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/workspaces/ws-1/projects/proj-1/generation-runs/run-1/generate-downstream',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('shows an error and does not refresh when generate-downstream fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, json: async () => ({ detail: 'No approved epics' }) }),
+    );
+    renderQueue({
+      latestRunId: 'run-1',
+      latestRunStage: 'EPICS_PENDING_REVIEW',
+      totalItemCount: 1,
+      items: [epicItem({ id: 'epic-1', status: 'APPROVED' })],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /generate stories & tasks/i }));
+
+    await waitFor(() => expect(screen.getByText('No approved epics')).toBeInTheDocument());
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('does not show the banner once the run is COMPLETE', () => {
+    renderQueue({
+      latestRunId: 'run-1',
+      latestRunStage: 'COMPLETE',
+      totalItemCount: 1,
+      items: [epicItem({ id: 'epic-1', status: 'APPROVED' })],
+    });
+    expect(screen.queryByText(/epics generated/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /generate stories & tasks/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('does not show the button for a VIEWER (canReview=false)', () => {
+    renderQueue({
+      canReview: false,
+      latestRunId: 'run-1',
+      latestRunStage: 'EPICS_PENDING_REVIEW',
+      totalItemCount: 1,
+      items: [epicItem({ id: 'epic-1', status: 'APPROVED' })],
+    });
+    expect(screen.getByText(/1 epic generated/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /generate stories & tasks/i }),
+    ).not.toBeInTheDocument();
   });
 });

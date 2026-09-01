@@ -139,3 +139,54 @@ describe('PipelineStepper step navigation', () => {
     expect(push).not.toHaveBeenCalled();
   });
 });
+
+describe('PipelineStepper staged-generation navigation', () => {
+  beforeEach(() => {
+    refresh.mockClear();
+    push.mockClear();
+    vi.unstubAllGlobals();
+  });
+
+  it('navigates straight to review instead of re-triggering generate when a run is already pending review', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <PipelineStepper
+        pipeline={WITH_SOURCE_PIPELINE}
+        workspaceId="ws-1"
+        defaultProjectId="proj-1"
+        pendingGenerationRunId="run-1"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(push).toHaveBeenCalledWith('/workspaces/ws-1/projects/proj-1/review');
+  });
+
+  it('navigates to review after a fresh generate call returns EPICS_PENDING_REVIEW', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ run_id: 'run-1', stage: 'EPICS_PENDING_REVIEW', stats: {} }),
+      }),
+    );
+    render(
+      <PipelineStepper
+        pipeline={WITH_SOURCE_PIPELINE}
+        workspaceId="ws-1"
+        defaultProjectId="proj-1"
+        pendingGenerationRunId={null}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }));
+
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith('/workspaces/ws-1/projects/proj-1/review'),
+    );
+    expect(refresh).not.toHaveBeenCalled();
+  });
+});

@@ -148,6 +148,8 @@ export default async function DeltaReviewPage({
             // never actually triggers here — these values are irrelevant.
             totalItemCount={rows.length}
             sourceCount={1}
+            latestRunId={null}
+            latestRunStage={null}
           />
         )}
       </div>

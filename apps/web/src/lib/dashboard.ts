@@ -272,6 +272,19 @@ export async function getOrCreateDefaultProjectId(
   return created.id;
 }
 
+/** The project's latest GenerationRun id if it's still EPICS_PENDING_REVIEW —
+ * lets the dashboard's Generate button navigate a returning user straight to
+ * review instead of re-triggering generate_epics on an already-pending run.
+ * Null once the run is COMPLETE (or none exists yet). */
+export async function getPendingGenerationRunId(projectId: string): Promise<string | null> {
+  const run = await prisma.generationRun.findFirst({
+    where: { projectId },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, stage: true },
+  });
+  return run?.stage === 'EPICS_PENDING_REVIEW' ? run.id : null;
+}
+
 export interface IntegrationSummary {
   toolKey: string;
   connected: boolean;

@@ -7,6 +7,7 @@ import {
   getAwaitingReviewSummary,
   getIntegrationsSummary,
   getOrCreateDefaultProjectId,
+  getPendingGenerationRunId,
   getPipelineCounts,
   getQualityScoreSummary,
   getRecentlyPublishedBatches,
@@ -67,6 +68,9 @@ export default async function WorkspaceDashboardPage({
   const reviewHref = defaultProjectId
     ? `/workspaces/${workspaceId}/projects/${defaultProjectId}/review`
     : null;
+  const pendingGenerationRunId = defaultProjectId
+    ? await getPendingGenerationRunId(defaultProjectId)
+    : null;
 
   const anyConnected = integrations.some((i) => i.connected);
   const invitesSent = false; // no cheap existing-invite check yet; refined if the Invite modal needs a "done" signal later
@@ -125,6 +129,7 @@ export default async function WorkspaceDashboardPage({
           checklistItems={checklistItems}
           dismissedInitially={workspace.onboardingChecklistDismissedAt !== null}
           defaultProjectId={defaultProjectId}
+          pendingGenerationRunId={pendingGenerationRunId}
         />
       </div>
     </div>

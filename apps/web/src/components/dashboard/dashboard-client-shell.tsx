@@ -56,6 +56,7 @@ export function DashboardClientShell({
   checklistItems,
   dismissedInitially,
   defaultProjectId,
+  pendingGenerationRunId,
 }: {
   workspaceId: string;
   organizationId: string | null;
@@ -74,6 +75,7 @@ export function DashboardClientShell({
   checklistItems: ChecklistItem[];
   dismissedInitially: boolean;
   defaultProjectId: string | null;
+  pendingGenerationRunId: string | null;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -145,6 +147,7 @@ export function DashboardClientShell({
         pipeline={pipeline}
         workspaceId={workspaceId}
         defaultProjectId={defaultProjectId}
+        pendingGenerationRunId={pendingGenerationRunId}
       />
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1.55fr_1fr] lg:items-start">

@@ -12,6 +12,11 @@ interface PipelineStepperProps {
    * other actions resolve one (getOrCreateDefaultProjectId). Null for a
    * VIEWER, who has no generate action here (same gate as Add source/Connect). */
   defaultProjectId: string | null;
+  /** Set when the project's latest GenerationRun is still EPICS_PENDING_REVIEW
+   * — a returning user's Generate click should jump straight to review (their
+   * actual next step) instead of re-triggering generate_epics on an
+   * already-pending run (harmless/idempotent, but a wasted round trip). */
+  pendingGenerationRunId?: string | null;
 }
 
 // Maps each pipeline stage to the real page it's backed by — there's no
@@ -35,15 +40,30 @@ const STAGE_PAGE: Record<string, string> = {
 // generate step is no longer linked from here) — and per-step navigation to
 // the underlying project page, since the pipeline bar itself has no other
 // way to move between stages.
-export function PipelineStepper({ pipeline, workspaceId, defaultProjectId }: PipelineStepperProps) {
+export function PipelineStepper({
+  pipeline,
+  workspaceId,
+  defaultProjectId,
+  pendingGenerationRunId,
+}: PipelineStepperProps) {
   const router = useRouter();
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const sourceCount = pipeline.stages.find((s) => s.key === 'ingest')?.count ?? 0;
+  const reviewHref = defaultProjectId
+    ? `/workspaces/${workspaceId}/projects/${defaultProjectId}/review`
+    : null;
 
   async function handleGenerate() {
     if (!defaultProjectId) return;
+    // A run is already sitting in EPICS_PENDING_REVIEW for this project —
+    // nothing new to generate, the reviewer's next step is to go approve
+    // epics, not re-trigger an idempotent-but-wasted round trip.
+    if (pendingGenerationRunId && reviewHref) {
+      router.push(reviewHref);
+      return;
+    }
     setGenerating(true);
     setError(null);
     try {
@@ -54,6 +74,11 @@ export function PipelineStepper({ pipeline, workspaceId, defaultProjectId }: Pip
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
         setError(body.detail ?? body.error ?? 'Generation failed — try again.');
+        return;
+      }
+      const payload = (await res.json()) as { stage?: string };
+      if (payload.stage === 'EPICS_PENDING_REVIEW' && reviewHref) {
+        router.push(reviewHref);
         return;
       }
       router.refresh();
