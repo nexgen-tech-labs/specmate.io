@@ -1,6 +1,15 @@
 """Epic 3 pipeline tests — real Postgres, fake AIAdapter injected via dependency
 override (canned per-pass outputs keyed on the request schema). Sync tests +
-asyncio.run for the event-loop reasons documented in test_sources.py."""
+asyncio.run for the event-loop reasons documented in test_sources.py.
+
+Staged generation (Onboarding Flow redesign follow-up): POST /generate now runs
+only passes 1-2 (cluster + epics) and returns stage=EPICS_PENDING_REVIEW; a
+second explicit POST /generation-runs/{run_id}/generate-downstream call — after
+the reviewer approves epics via the normal draft-item decision workflow — runs
+passes 3-5 (stories+tasks, supporting items, scoring) scoped to approved epics
+only. Most of these tests therefore drive both calls in sequence, approving
+epic(s) directly via the DB (the review-decision workflow itself lives in
+apps/web, not apps/api — see apps/web/src/lib/review.ts)."""
 
 from __future__ import annotations
 
@@ -24,7 +33,10 @@ from app.main import app
 from app.models import (
     AiCallLog,
     DraftItem,
+    DraftItemStatus,
+    DraftItemType,
     GenerationRun,
+    GenerationRunStage,
     Project,
     RawRequirement,
     ReferenceItem,
@@ -274,6 +286,29 @@ async def _count_traces(item_id: str) -> int:
         await engine.dispose()
 
 
+async def _approve_all_epics(project_id: str) -> None:
+    """Stand-in for the apps/web review-decision workflow (approve/reject lives
+    there, not in apps/api) — flips every EPIC DraftItem for this project to
+    APPROVED so generate_downstream has something to work from."""
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            epics = (
+                await session.execute(
+                    select(DraftItem).where(
+                        DraftItem.projectId == project_id,
+                        DraftItem.type == DraftItemType.EPIC,
+                        DraftItem.deletedAt.is_(None),
+                    )
+                )
+            ).scalars()
+            for epic in epics:
+                epic.status = DraftItemStatus.APPROVED
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
 def _client_with_fake(chunk_ids: list[str]) -> TestClient:
     app.dependency_overrides[get_generation_adapter] = lambda: FakeAdapter(chunk_ids)
     return TestClient(app)
@@ -284,6 +319,25 @@ def _clear_override() -> None:
     _dispose_app_engine()
 
 
+def _generate_epics_and_downstream(client: TestClient, project_id: str) -> tuple[dict, dict]:
+    """Drives the full two-step flow: POST /generate (epics only), approve the
+    epic(s) it produced, then POST the downstream call. Returns both responses'
+    JSON bodies."""
+    epics_response = client.post(f"/projects/{project_id}/generate", json={})
+    assert epics_response.status_code == 200, epics_response.text
+    epics_body = epics_response.json()
+    assert epics_body["stage"] == "EPICS_PENDING_REVIEW"
+
+    _dispose_app_engine()
+    asyncio.run(_approve_all_epics(project_id))
+
+    downstream_response = client.post(
+        f"/generation-runs/{epics_body['run_id']}/generate-downstream", json={}
+    )
+    assert downstream_response.status_code == 200, downstream_response.text
+    return epics_body, downstream_response.json()
+
+
 def test_full_generation_run_produces_hierarchy_traces_scores_and_flags() -> None:
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
@@ -291,14 +345,12 @@ def test_full_generation_run_produces_hierarchy_traces_scores_and_flags() -> Non
 
     client = _client_with_fake(chunk_ids)
     try:
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        epics_body, downstream_body = _generate_epics_and_downstream(client, project_id)
     finally:
         _clear_override()
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["reused_existing_run"] is False
-    stats = body["stats"]
+    assert downstream_body["stage"] == "COMPLETE"
+    stats = downstream_body["stats"]
     assert stats["items_by_type"]["EPIC"] == 1
     assert stats["items_by_type"]["STORY"] == 2
     assert stats["items_by_type"]["TASK"] == 1
@@ -326,9 +378,11 @@ def test_full_generation_run_produces_hierarchy_traces_scores_and_flags() -> Non
     assert assumption.flags is not None and assumption.flags.get("noTrace") is True
 
     # Scoring + gap (Issues 3.4/3.6): specific answerable question, not generic.
-    assert epic.qualityScore is not None and epic.scoreDetail is not None
-    erp_flags = story_erp.flags or {}
-    assert "ERP version" in erp_flags["gap"]["question"]  # type: ignore[index]
+    # downstream_drafts is [story_card, story_erp, task, ac, risk, assumption] —
+    # the fake scoring data's item_index=2 (the low-score gap one) lands on task.
+    assert story_card.qualityScore is not None
+    task_flags = task.flags or {}
+    assert "ERP version" in task_flags["gap"]["question"]  # type: ignore[index]
 
     # Duplicate flag (Issue 3.5) against the PAY-118 reference item.
     dup_flags = story_card.flags or {}
@@ -340,9 +394,181 @@ def test_full_generation_run_produces_hierarchy_traces_scores_and_flags() -> Non
     asyncio.run(_cleanup(ids))
 
 
+def test_generate_epics_persists_only_epics_and_awaits_review() -> None:
+    """The whole point of staging: POST /generate stops after epics, before any
+    stories/tasks/supporting items are drafted."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        response = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stage"] == "EPICS_PENDING_REVIEW"
+    assert body["reused_existing_run"] is False
+    assert body["stats"]["items_by_type"] == {"EPIC": 1}
+
+    items = asyncio.run(_fetch_items(project_id))
+    assert len(items) == 1
+    assert items[0].type == DraftItemType.EPIC
+    assert items[0].status == DraftItemStatus.PENDING
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_downstream_requires_approved_epic() -> None:
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        epics_response = client.post(f"/projects/{project_id}/generate", json={})
+        run_id = epics_response.json()["run_id"]
+        _dispose_app_engine()
+        # No approval step — every epic is still PENDING.
+        downstream_response = client.post(f"/generation-runs/{run_id}/generate-downstream", json={})
+    finally:
+        _clear_override()
+
+    assert downstream_response.status_code == 422
+    assert "approve" in downstream_response.json()["detail"].lower()
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_downstream_returns_404_for_unknown_run() -> None:
+    client = TestClient(app)
+    response = client.post("/generation-runs/does-not-exist/generate-downstream", json={})
+    _dispose_app_engine()
+    assert response.status_code == 404
+
+
+def test_generate_downstream_returns_409_when_already_complete() -> None:
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        epics_body, _ = _generate_epics_and_downstream(client, project_id)
+        _dispose_app_engine()
+        # Run is now COMPLETE — calling downstream again should be rejected.
+        second = client.post(
+            f"/generation-runs/{epics_body['run_id']}/generate-downstream", json={}
+        )
+    finally:
+        _clear_override()
+
+    assert second.status_code == 409
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_idempotent_while_epics_pending_review() -> None:
+    """Re-calling /generate with unchanged content while the run is still
+    EPICS_PENDING_REVIEW returns the same run, not a duplicate epic set."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        first = client.post(f"/projects/{project_id}/generate", json={})
+        _dispose_app_engine()
+        second = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+
+    assert first.json()["reused_existing_run"] is False
+    assert second.json()["reused_existing_run"] is True
+    assert second.json()["run_id"] == first.json()["run_id"]
+    assert second.json()["stage"] == "EPICS_PENDING_REVIEW"
+    assert len(asyncio.run(_fetch_items(project_id))) == 1  # still just the one epic
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_downstream_only_covers_approved_epics() -> None:
+    """A rejected epic gets no children — generate_downstream only expands
+    epics the reviewer actually approved."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        epics_response = client.post(f"/projects/{project_id}/generate", json={})
+        run_id = epics_response.json()["run_id"]
+        _dispose_app_engine()
+
+        # Reject the only epic (this fixture's FakeAdapter always drafts exactly
+        # one), confirm downstream correctly refuses with zero approved epics.
+        async def reject_epic() -> None:
+            engine = create_async_engine(settings.database_url)
+            try:
+                async with AsyncSession(engine) as session:
+                    epic = (
+                        await session.execute(
+                            select(DraftItem).where(
+                                DraftItem.projectId == project_id,
+                                DraftItem.type == DraftItemType.EPIC,
+                            )
+                        )
+                    ).scalar_one()
+                    epic.status = DraftItemStatus.REJECTED
+                    await session.commit()
+            finally:
+                await engine.dispose()
+
+        asyncio.run(reject_epic())
+        downstream_response = client.post(f"/generation-runs/{run_id}/generate-downstream", json={})
+    finally:
+        _clear_override()
+
+    assert downstream_response.status_code == 422
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_downstream_sets_stage_complete_with_updated_timestamp() -> None:
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        epics_body, downstream_body = _generate_epics_and_downstream(client, project_id)
+    finally:
+        _clear_override()
+
+    assert downstream_body["stage"] == "COMPLETE"
+
+    async def fetch_run() -> GenerationRun:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with AsyncSession(engine) as session:
+                run = await session.get(GenerationRun, epics_body["run_id"])
+                assert run is not None
+                return run
+        finally:
+            await engine.dispose()
+
+    run = asyncio.run(fetch_run())
+    assert run.stage == GenerationRunStage.COMPLETE
+    assert run.updatedAt >= run.createdAt
+
+    asyncio.run(_cleanup(ids))
+
+
 def test_first_generation_stamps_workspace_time_to_value_once() -> None:
     """Issue 10.10: firstGenerationAt is set on a workspace's first-ever
-    completed generation run, and never overwritten by later runs."""
+    completed (downstream) generation run, and never overwritten by later runs."""
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
     project_id = str(ids["project_id"])
@@ -361,33 +587,12 @@ def test_first_generation_stamps_workspace_time_to_value_once() -> None:
     client = _client_with_fake(chunk_ids)
     try:
         assert asyncio.run(fetch_stamp()) is None  # unstamped before any generation
-        client.post(f"/projects/{project_id}/generate", json={})
+        _generate_epics_and_downstream(client, project_id)
     finally:
         _clear_override()
 
     first_stamp = asyncio.run(fetch_stamp())
     assert first_stamp is not None
-
-    asyncio.run(_cleanup(ids))
-
-
-def test_regenerating_unchanged_content_reuses_run_without_duplicating_items() -> None:
-    ids = asyncio.run(_create_fixture())
-    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
-    project_id = str(ids["project_id"])
-
-    client = _client_with_fake(chunk_ids)
-    try:
-        first = client.post(f"/projects/{project_id}/generate", json={})
-        _dispose_app_engine()
-        second = client.post(f"/projects/{project_id}/generate", json={})
-    finally:
-        _clear_override()
-
-    assert first.json()["reused_existing_run"] is False
-    assert second.json()["reused_existing_run"] is True
-    assert second.json()["run_id"] == first.json()["run_id"]
-    assert len(asyncio.run(_fetch_items(project_id))) == 7  # unchanged
 
     asyncio.run(_cleanup(ids))
 
@@ -399,7 +604,7 @@ def test_regenerate_item_creates_revision_and_preserves_original() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        client.post(f"/projects/{project_id}/generate", json={})
+        _generate_epics_and_downstream(client, project_id)
         _dispose_app_engine()
 
         items = asyncio.run(_fetch_items(project_id))
@@ -441,7 +646,7 @@ def test_generation_summary_reports_live_counts() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        client.post(f"/projects/{project_id}/generate", json={})
+        _generate_epics_and_downstream(client, project_id)
         _dispose_app_engine()
         summary = client.get(f"/projects/{project_id}/generation-summary")
     finally:
@@ -514,6 +719,35 @@ def test_generate_returns_503_when_ai_generation_fails() -> None:
     asyncio.run(_cleanup(ids))
 
 
+def test_generate_downstream_returns_503_when_ai_generation_fails() -> None:
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        epics_response = client.post(f"/projects/{project_id}/generate", json={})
+        run_id = epics_response.json()["run_id"]
+        _dispose_app_engine()
+        asyncio.run(_approve_all_epics(project_id))
+    finally:
+        _clear_override()
+
+    app.dependency_overrides[get_generation_adapter] = lambda: FailingAdapter()
+    client = TestClient(app)
+    try:
+        response = client.post(f"/generation-runs/{run_id}/generate-downstream", json={})
+    finally:
+        app.dependency_overrides.pop(get_generation_adapter, None)
+        _dispose_app_engine()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
+    assert "SECRET-LOOKING-TOKEN" not in response.text
+
+    asyncio.run(_cleanup(ids))
+
+
 def test_regenerate_item_returns_503_when_ai_generation_fails() -> None:
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
@@ -521,7 +755,7 @@ def test_regenerate_item_returns_503_when_ai_generation_fails() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        client.post(f"/projects/{project_id}/generate", json={})
+        _generate_epics_and_downstream(client, project_id)
         _dispose_app_engine()
 
         items = asyncio.run(_fetch_items(project_id))
@@ -633,11 +867,12 @@ def _fake_claude_response_for(request_body: dict[str, object], chunk_ids: list[s
 def test_real_generation_adapter_composition_produces_a_run_end_to_end() -> None:
     """Issue #107: exercises the actual, UNMODIFIED get_generation_adapter()
     composition (SchedulingAdapter(LoggingAdapter(ClaudeAdapter(), session),
-    _ai_scheduler)) through the real /projects/{id}/generate endpoint — every
-    other generation test overrides get_generation_adapter entirely, so this
-    is the only test that would catch a broken composition order, a dropped
-    layer, or the scheduler singleton not being reused. Only ClaudeAdapter's
-    HTTP layer (AsyncAnthropic) is stubbed."""
+    _ai_scheduler)) through the real /projects/{id}/generate and
+    /generation-runs/{id}/generate-downstream endpoints — every other
+    generation test overrides get_generation_adapter entirely, so this is the
+    only test that would catch a broken composition order, a dropped layer, or
+    the scheduler singleton not being reused. Only ClaudeAdapter's HTTP layer
+    (AsyncAnthropic) is stubbed."""
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
     project_id = str(ids["project_id"])
@@ -654,7 +889,13 @@ def test_real_generation_adapter_composition_produces_a_run_end_to_end() -> None
         "app.services.ai.claude_adapter.AsyncAnthropic", return_value=mock_anthropic_client
     ):
         client = TestClient(app)
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        epics_response = client.post(f"/projects/{project_id}/generate", json={})
+        run_id = epics_response.json()["run_id"]
+        _dispose_app_engine()
+        asyncio.run(_approve_all_epics(project_id))
+
+        client = TestClient(app)
+        response = client.post(f"/generation-runs/{run_id}/generate-downstream", json={})
         _dispose_app_engine()
 
     assert response.status_code == 200
@@ -673,7 +914,7 @@ def test_real_generation_adapter_composition_produces_a_run_end_to_end() -> None
             await engine.dispose()
 
     # LoggingAdapter (the real one, not bypassed) should have written one
-    # AiCallLog row per pass — proves LoggingAdapter is genuinely in the chain.
+    # AiCallLog row per pass across both calls (2 for epics + 3 for downstream).
     assert asyncio.run(count_call_logs()) == 5
 
     asyncio.run(_purge_ai_call_logs(workspace_id))

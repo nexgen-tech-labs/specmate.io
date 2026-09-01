@@ -558,9 +558,16 @@ class PublishMapping(Base):
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
 
 
+class GenerationRunStage(str, enum.Enum):
+    EPICS_PENDING_REVIEW = "EPICS_PENDING_REVIEW"
+    COMPLETE = "COMPLETE"
+
+
 class GenerationRun(Base):
     """One AI generation run over a project's RawRequirements (Issue 3.1) — contentHash
-    provides idempotency, stats power the generation summary (Issue 3.10)."""
+    provides idempotency, stats power the generation summary (Issue 3.10). Staged
+    generation: stage=EPICS_PENDING_REVIEW after only epics are persisted, COMPLETE
+    once stories/tasks/supporting items have been generated for approved epics."""
 
     __tablename__ = "GenerationRun"
 
@@ -568,8 +575,16 @@ class GenerationRun(Base):
     projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
     contentHash: Mapped[str] = mapped_column(String)
     promptVersion: Mapped[str] = mapped_column(String)
+    stage: Mapped[GenerationRunStage] = mapped_column(
+        Enum(GenerationRunStage, name="GenerationRunStage", create_type=False),
+        default=GenerationRunStage.COMPLETE,
+    )
+    summarizedFragmentsBlock: Mapped[str | None] = mapped_column(String, nullable=True)
     stats: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)
+    )
+    updatedAt: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)
     )
 

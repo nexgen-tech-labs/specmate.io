@@ -690,13 +690,30 @@ model OrganizationInvite {
 // One AI generation run over a project's RawRequirements (Issue 3.1). contentHash is
 // a sha256 of the ordered raw-requirement texts — re-running against unchanged content
 // reuses the run instead of duplicating items (idempotency), and stats power Issue 3.10.
+// Staged generation (Onboarding Flow redesign follow-up): epics are generated
+// and persisted first for human approval, then stories/tasks/supporting items
+// are generated only for approved epics via a second explicit call. Existing
+// rows default to COMPLETE so historical single-shot runs remain valid with
+// no backfill needed.
+enum GenerationRunStage {
+  EPICS_PENDING_REVIEW
+  COMPLETE
+}
+
 model GenerationRun {
-  id            String   @id @default(cuid())
-  projectId     String
-  contentHash   String
-  promptVersion String
-  stats         Json?
-  createdAt     DateTime @default(now())
+  id                       String             @id @default(cuid())
+  projectId                String
+  contentHash              String
+  promptVersion            String
+  stage                    GenerationRunStage @default(COMPLETE)
+  // Cached chunking/summarization digest (character-budget triggered) so the
+  // downstream generation call reuses the same summary instead of re-running
+  // the summarization LLM calls — null when the raw fragments block never
+  // exceeded the size budget.
+  summarizedFragmentsBlock String?
+  stats                    Json?
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
 
   project Project @relation(fields: [projectId], references: [id])
 

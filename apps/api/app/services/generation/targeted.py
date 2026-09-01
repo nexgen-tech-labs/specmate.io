@@ -1,6 +1,6 @@
 """Targeted regeneration (Issue 9.2): scopes AI generation to only the fragments a
 source-version diff (Issue 9.1) actually flagged as added or modified, instead of
-re-running the whole-project pipeline (Epic 3's run_generation).
+re-running the whole-project pipeline (Epic 3's generate_epics/generate_downstream).
 
 For each changed fragment:
   - modified: revise the existing DraftItem(s) traced to the fragment it supersedes
@@ -13,8 +13,8 @@ For each changed fragment:
   - unchanged: untouched. Not read, not re-sent to the AI, no DraftItem touched.
 
 Cross-project consistency (new epic per changed fragment, hierarchy drift, etc.) is an
-explicit non-goal here — that's what a full run_generation pass is for. This is a
-narrow, cheap top-up for incremental source edits."""
+explicit non-goal here — that's what a full generate_epics + generate_downstream pass
+is for. This is a narrow, cheap top-up for incremental source edits."""
 
 from __future__ import annotations
 

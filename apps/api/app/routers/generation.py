@@ -19,6 +19,7 @@ from app.models import (
     DraftItem,
     DraftItemStatus,
     GenerationRun,
+    GenerationRunStage,
     Project,
     RawRequirement,
     Source,
@@ -31,7 +32,7 @@ from app.services.ai.logging_adapter import LoggingAdapter
 from app.services.ai.prompts.generation_v1 import GENERATION_PROMPT_VERSION, REGENERATE_V1
 from app.services.ai.scheduler import AIScheduler
 from app.services.ai.scheduling_adapter import SchedulingAdapter
-from app.services.generation.pipeline import GenerationError, run_generation
+from app.services.generation.pipeline import GenerationError, generate_downstream, generate_epics
 from app.services.generation.schemas import REGENERATE_SCHEMA
 from app.services.generation.targeted import (
     TargetedRegenerationError,
@@ -58,12 +59,12 @@ def _now() -> datetime:
 
 
 class GenerateBody(BaseModel):
-    # Optional restriction of supporting item types (Issue 3.1: configurable per project).
-    item_types: list[str] | None = None
+    pass
 
 
 class GenerateResponse(BaseModel):
     run_id: str
+    stage: str
     reused_existing_run: bool
     stats: dict[str, object] | None
 
@@ -75,18 +76,16 @@ async def generate(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     adapter: Annotated[AIAdapter, Depends(get_generation_adapter)],
 ) -> GenerateResponse:
+    """Passes 1-2 only (cluster + epics) — see generate_downstream for the
+    second explicit call that generates stories/tasks/supporting items for
+    whichever epics the reviewer approves."""
     before = (
         await session.execute(
             select(func.count(GenerationRun.id)).where(GenerationRun.projectId == project_id)
         )
     ).scalar_one()
     try:
-        run = await run_generation(
-            project_id,
-            session,
-            adapter,
-            item_types=set(body.item_types) if body.item_types else None,
-        )
+        run = await generate_epics(project_id, session, adapter)
     except GenerationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except AIGenerationError as exc:
@@ -99,9 +98,53 @@ async def generate(
     ).scalar_one()
     return GenerateResponse(
         run_id=run.id,
+        stage=run.stage.value,
         reused_existing_run=after == before,
         stats=run.stats,
     )
+
+
+class GenerateDownstreamBody(BaseModel):
+    # Optional restriction of supporting item types (Issue 3.1: configurable per project).
+    item_types: list[str] | None = None
+
+
+class GenerateDownstreamResponse(BaseModel):
+    run_id: str
+    stage: str
+    stats: dict[str, object] | None
+
+
+@router.post("/generation-runs/{run_id}/generate-downstream")
+async def generate_downstream_endpoint(
+    run_id: str,
+    body: GenerateDownstreamBody,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    adapter: Annotated[AIAdapter, Depends(get_generation_adapter)],
+) -> GenerateDownstreamResponse:
+    """Passes 3-5, scoped to whichever epics from `run_id` the reviewer has
+    approved. Call this once at least one epic is APPROVED (via the normal
+    draft-item review/decision workflow)."""
+    run = await session.get(GenerationRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Generation run not found.")
+    if run.stage != GenerationRunStage.EPICS_PENDING_REVIEW:
+        raise HTTPException(
+            status_code=409, detail="This run has already completed downstream generation."
+        )
+    try:
+        run = await generate_downstream(
+            run_id,
+            session,
+            adapter,
+            item_types=set(body.item_types) if body.item_types else None,
+        )
+    except GenerationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AIGenerationError as exc:
+        raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
+
+    return GenerateDownstreamResponse(run_id=run.id, stage=run.stage.value, stats=run.stats)
 
 
 class RegenerateBody(BaseModel):
