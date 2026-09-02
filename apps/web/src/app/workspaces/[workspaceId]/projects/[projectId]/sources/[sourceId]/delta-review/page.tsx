@@ -86,6 +86,11 @@ export default async function DeltaReviewPage({
       flags,
       parentId: item.parentId,
       signedOff: item.signedOffByUserId !== null,
+      // Delta review is already a small, source-scoped view — grouping it by
+      // GenerationRun would be clutter, not clarity, so every row here lands
+      // in ReviewQueue's single "Ungrouped" bucket regardless of which run
+      // actually produced it.
+      generationRunId: null,
       originalDraft: item.originalDraft as ReviewItem['originalDraft'],
       editHistory: (item.editHistory as ReviewItem['editHistory']) ?? [],
       publishedKey: item.publishedItems[0]?.externalKey ?? null,
@@ -150,6 +155,7 @@ export default async function DeltaReviewPage({
             sourceCount={1}
             latestRunId={null}
             latestRunStage={null}
+            runs={[]}
           />
         )}
       </div>

@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { requireProjectRole } from '@/lib/workspace-context';
 import { prisma } from '@/lib/prisma';
-import { ReviewQueue, type ReviewItem } from '@/components/review/review-queue';
+import { ReviewQueue, type ReviewItem, type RunGroup } from '@/components/review/review-queue';
 
 export default async function ReviewPage({
   params,
@@ -32,12 +32,14 @@ export default async function ReviewPage({
   // Staged generation: while the latest run is still EPICS_PENDING_REVIEW,
   // the queue below contains only epics — ReviewQueue shows a banner + a
   // "Generate stories & tasks" button instead of treating this like a normal
-  // fully-generated queue.
-  const latestRun = await prisma.generationRun.findFirst({
+  // fully-generated queue. Every run (not just the latest) is fetched so the
+  // queue can group items into a collapsible section per generation batch.
+  const runs = await prisma.generationRun.findMany({
     where: { projectId },
     orderBy: { createdAt: 'desc' },
-    select: { id: true, stage: true },
+    select: { id: true, name: true, tag: true, stage: true, createdAt: true },
   });
+  const latestRun = runs[0] ?? null;
 
   const items = await prisma.draftItem.findMany({
     where: {
@@ -88,6 +90,7 @@ export default async function ReviewPage({
     flags: item.flags as ReviewItem['flags'],
     parentId: item.parentId,
     signedOff: item.signedOffByUserId !== null,
+    generationRunId: item.generationRunId,
     originalDraft: item.originalDraft as ReviewItem['originalDraft'],
     editHistory: (item.editHistory as ReviewItem['editHistory']) ?? [],
     publishedKey: item.publishedItems[0]?.externalKey ?? null,
@@ -152,6 +155,13 @@ export default async function ReviewPage({
           sourceCount={sourceCount}
           latestRunId={latestRun?.id ?? null}
           latestRunStage={latestRun?.stage ?? null}
+          runs={runs.map((r): RunGroup => ({
+            id: r.id,
+            name: r.name,
+            tag: r.tag,
+            stage: r.stage,
+            createdAt: r.createdAt.toISOString(),
+          }))}
         />
       </div>
     </div>

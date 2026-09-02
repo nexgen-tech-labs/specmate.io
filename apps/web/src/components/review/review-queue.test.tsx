@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { ReviewQueue, type ReviewItem } from './review-queue';
+import { ReviewQueue, type ReviewItem, type RunGroup } from './review-queue';
 
 const refresh = vi.fn();
 vi.mock('next/navigation', () => ({
@@ -21,6 +21,7 @@ function renderQueue(overrides: Partial<Parameters<typeof ReviewQueue>[0]> = {})
       sourceCount={0}
       latestRunId={null}
       latestRunStage={null}
+      runs={[]}
       {...overrides}
     />,
   );
@@ -38,12 +39,24 @@ function epicItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
     flags: null,
     parentId: null,
     signedOff: false,
+    generationRunId: null,
     originalDraft: null,
     editHistory: [],
     sources: [],
     publishedKey: null,
     publishedUrl: null,
     duplicateReference: null,
+    ...overrides,
+  };
+}
+
+function runGroup(overrides: Partial<RunGroup> = {}): RunGroup {
+  return {
+    id: 'run-1',
+    name: 'proj-payments-generated01',
+    tag: 'payments',
+    stage: 'COMPLETE',
+    createdAt: '2026-09-01T00:00:00.000Z',
     ...overrides,
   };
 }
@@ -88,6 +101,7 @@ describe('ReviewQueue empty states', () => {
           flags: null,
           parentId: null,
           signedOff: false,
+          generationRunId: null,
           originalDraft: null,
           editHistory: [],
           sources: [],
@@ -185,5 +199,126 @@ describe('ReviewQueue staged-generation banner', () => {
     expect(
       screen.queryByRole('button', { name: /generate stories & tasks/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+function storyItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
+  return {
+    id: 'story-1',
+    type: 'STORY',
+    title: 'A story',
+    description: 'desc',
+    status: 'PENDING',
+    qualityScore: null,
+    scoreDetail: null,
+    flags: null,
+    parentId: null,
+    signedOff: false,
+    generationRunId: null,
+    originalDraft: null,
+    editHistory: [],
+    sources: [],
+    publishedKey: null,
+    publishedUrl: null,
+    duplicateReference: null,
+    ...overrides,
+  };
+}
+
+describe('ReviewQueue run grouping', () => {
+  it('renders one collapsible section per run, each labeled with its name', () => {
+    renderQueue({
+      runs: [
+        runGroup({ id: 'run-1', name: 'proj-payments-generated01' }),
+        runGroup({ id: 'run-2', name: 'proj-billing-generated02' }),
+      ],
+      items: [
+        storyItem({ id: 's1', generationRunId: 'run-1' }),
+        storyItem({ id: 's2', generationRunId: 'run-2' }),
+      ],
+      totalItemCount: 2,
+    });
+
+    expect(screen.getByText('proj-payments-generated01')).toBeInTheDocument();
+    expect(screen.getByText('proj-billing-generated02')).toBeInTheDocument();
+    expect(document.querySelectorAll('details[data-tour="review-run-group"]')).toHaveLength(2);
+  });
+
+  it('falls back to an Ungrouped section for items with no generationRunId', () => {
+    renderQueue({
+      runs: [runGroup({ id: 'run-1', name: 'proj-payments-generated01' })],
+      items: [
+        storyItem({ id: 's1', generationRunId: 'run-1' }),
+        storyItem({ id: 's2', generationRunId: null }),
+      ],
+      totalItemCount: 2,
+    });
+
+    expect(screen.getByText('proj-payments-generated01')).toBeInTheDocument();
+    expect(screen.getByText('Ungrouped')).toBeInTheDocument();
+  });
+
+  it('global select-all selects items across every group, and toggling again clears it', () => {
+    renderQueue({
+      runs: [
+        runGroup({ id: 'run-1', name: 'proj-payments-generated01' }),
+        runGroup({ id: 'run-2', name: 'proj-billing-generated02' }),
+      ],
+      items: [
+        storyItem({ id: 's1', generationRunId: 'run-1' }),
+        storyItem({ id: 's2', generationRunId: 'run-2' }),
+      ],
+      totalItemCount: 2,
+    });
+
+    fireEvent.click(screen.getByLabelText('Select all'));
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Select all'));
+    expect(screen.queryByText(/selected/)).not.toBeInTheDocument();
+  });
+
+  it("a group's own select-all only selects that group's items", () => {
+    renderQueue({
+      runs: [
+        runGroup({ id: 'run-1', name: 'proj-payments-generated01' }),
+        runGroup({ id: 'run-2', name: 'proj-billing-generated02' }),
+      ],
+      items: [
+        storyItem({ id: 's1', generationRunId: 'run-1' }),
+        storyItem({ id: 's2', generationRunId: 'run-2' }),
+      ],
+      totalItemCount: 2,
+    });
+
+    const groupCheckboxes = document.querySelectorAll('summary input[type="checkbox"]');
+    expect(groupCheckboxes).toHaveLength(2);
+    fireEvent.click(groupCheckboxes[0]);
+
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
+  });
+});
+
+describe('ReviewQueue status filter chips', () => {
+  it('links to the status-filtered URL and highlights the active status', () => {
+    renderQueue({ activeFilters: { status: 'APPROVED' } });
+
+    // The already-active chip's link clears the filter (toggle-off); the
+    // active state is instead shown via styling, asserted below.
+    const approvedChip = screen.getByRole('link', { name: 'APPROVED' });
+    expect(approvedChip).toHaveAttribute('href', '/workspaces/ws-1/projects/proj-1/review');
+    expect(approvedChip.className).toContain('border-cobalt');
+
+    const pendingChip = screen.getByRole('link', { name: 'PENDING' });
+    expect(pendingChip).toHaveAttribute(
+      'href',
+      '/workspaces/ws-1/projects/proj-1/review?status=PENDING',
+    );
+  });
+
+  it('clicking the active status chip again clears the filter', () => {
+    renderQueue({ activeFilters: { status: 'REJECTED' } });
+    const chip = screen.getByRole('link', { name: 'REJECTED' });
+    expect(chip).toHaveAttribute('href', '/workspaces/ws-1/projects/proj-1/review');
   });
 });
