@@ -67,6 +67,8 @@ class GenerateResponse(BaseModel):
     stage: str
     reused_existing_run: bool
     stats: dict[str, object] | None
+    tag: str | None = None
+    name: str | None = None
 
 
 @router.post("/projects/{project_id}/generate")
@@ -101,6 +103,8 @@ async def generate(
         stage=run.stage.value,
         reused_existing_run=after == before,
         stats=run.stats,
+        tag=run.tag,
+        name=run.name,
     )
 
 
@@ -145,6 +149,46 @@ async def generate_downstream_endpoint(
         raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
 
     return GenerateDownstreamResponse(run_id=run.id, stage=run.stage.value, stats=run.stats)
+
+
+class UpdateGenerationRunBody(BaseModel):
+    tag: str | None = None
+    name: str | None = None
+
+
+class UpdateGenerationRunResponse(BaseModel):
+    id: str
+    tag: str | None
+    name: str | None
+    stage: str
+
+
+@router.patch("/generation-runs/{run_id}")
+async def update_generation_run(
+    run_id: str,
+    body: UpdateGenerationRunBody,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> UpdateGenerationRunResponse:
+    """Lets a reviewer rename the AI-suggested tag/name for a run — display
+    labels only, no uniqueness constraint or effect on idempotency."""
+    run = await session.get(GenerationRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Generation run not found.")
+
+    if body.tag is not None:
+        trimmed_tag = body.tag.strip()
+        if not trimmed_tag:
+            raise HTTPException(status_code=422, detail="tag cannot be empty.")
+        run.tag = trimmed_tag
+    if body.name is not None:
+        trimmed_name = body.name.strip()
+        if not trimmed_name:
+            raise HTTPException(status_code=422, detail="name cannot be empty.")
+        run.name = trimmed_name
+    run.updatedAt = _now()
+
+    await session.commit()
+    return UpdateGenerationRunResponse(id=run.id, tag=run.tag, name=run.name, stage=run.stage.value)
 
 
 class RegenerateBody(BaseModel):

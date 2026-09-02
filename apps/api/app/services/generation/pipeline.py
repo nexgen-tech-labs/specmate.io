@@ -32,12 +32,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -153,6 +154,48 @@ async def _fetch_fragments(project_id: str, session: AsyncSession) -> list[RawRe
         .order_by(RawRequirement.sourceId, RawRequirement.order)
     )
     return list(result.scalars())
+
+
+async def _fetch_new_fragments(project_id: str, session: AsyncSession) -> list[RawRequirement]:
+    """Like _fetch_fragments, but excludes sources that already contributed to
+    a prior generate_epics call — this is what prevents a new source triggering
+    a full re-cluster/re-epic of content the model has already seen."""
+    result = await session.execute(
+        select(RawRequirement)
+        .join(Source, Source.id == RawRequirement.sourceId)
+        .where(
+            Source.projectId == project_id,
+            Source.deletedAt.is_(None),
+            Source.generatedInRunId.is_(None),
+            RawRequirement.deletedAt.is_(None),
+        )
+        .order_by(RawRequirement.sourceId, RawRequirement.order)
+    )
+    return list(result.scalars())
+
+
+async def _fetch_fragments_for_run(
+    run_id: str, project_id: str, session: AsyncSession
+) -> list[RawRequirement]:
+    """Fragments from exactly the sources that contributed to `run_id`'s epics
+    pass — not every currently-unprocessed source, and not the whole project."""
+    result = await session.execute(
+        select(RawRequirement)
+        .join(Source, Source.id == RawRequirement.sourceId)
+        .where(
+            Source.projectId == project_id,
+            Source.generatedInRunId == run_id,
+            Source.deletedAt.is_(None),
+            RawRequirement.deletedAt.is_(None),
+        )
+        .order_by(RawRequirement.sourceId, RawRequirement.order)
+    )
+    return list(result.scalars())
+
+
+def _slugify(text: str, *, fallback: str, max_len: int = 24) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:max_len].strip("-") or fallback
 
 
 def _row(
@@ -321,8 +364,19 @@ async def generate_epics(
     workspace = await session.get(Workspace, project.workspaceId)
     assert workspace is not None
 
-    fragments = await _fetch_fragments(project_id, session)
+    fragments = await _fetch_new_fragments(project_id, session)
     if not fragments:
+        total_fragments = await session.scalar(
+            select(func.count())
+            .select_from(RawRequirement)
+            .join(Source, Source.id == RawRequirement.sourceId)
+            .where(Source.projectId == project_id, Source.deletedAt.is_(None))
+        )
+        if total_fragments:
+            raise GenerationError(
+                "All current sources have already been included in a generation run. "
+                "Remove a source or add new content to generate again."
+            )
         raise GenerationError("Project has no ingested requirements to generate from.")
 
     content_hash = _content_hash(fragments)
@@ -381,15 +435,30 @@ async def generate_epics(
     # a duplicate epic should be flagged before the reviewer spends time on it.
     await _apply_duplicate_flags(session, project_id, workspace, epics)
 
+    tag = _slugify(str(epics_data.get("suggested_tag", "")), fallback="draft", max_len=24)
+    prior_run_count = await session.scalar(
+        select(func.count()).select_from(GenerationRun).where(GenerationRun.projectId == project_id)
+    )
+    run_number = (prior_run_count or 0) + 1
+    project_slug = _slugify(project.name, fallback="project", max_len=32)
+    run_name = f"{project_slug}-{tag}-generated{run_number:02d}"
+
     run = GenerationRun(
         projectId=project_id,
         contentHash=content_hash,
         promptVersion=GENERATION_PROMPT_VERSION,
         stage=GenerationRunStage.EPICS_PENDING_REVIEW,
         summarizedFragmentsBlock=summarized_block,
+        tag=tag,
+        name=run_name,
     )
     session.add(run)
     await session.flush()
+
+    source_ids = {fragment_source[f.id] for f in fragments}
+    await session.execute(
+        update(Source).where(Source.id.in_(source_ids)).values(generatedInRunId=run.id)
+    )
 
     now = _now()
     epic_rows = _persist_items(session, project_id, run.id, epics, lambda _d: None, now)
@@ -466,7 +535,9 @@ async def generate_downstream(
     if not epic_rows:
         raise GenerationError("No approved epics to generate from — approve at least one epic first.")
 
-    fragments = await _fetch_fragments(project_id, session)
+    # Scoped to exactly this run's sources (stamped by generate_epics), not the
+    # whole project — a newer run may have since claimed other sources.
+    fragments = await _fetch_fragments_for_run(run_id, project_id, session)
     fragment_ids = {f.id for f in fragments}
     fragment_source = {f.id: f.sourceId for f in fragments}
     # Reuse the digest generate_epics already computed and cached (if

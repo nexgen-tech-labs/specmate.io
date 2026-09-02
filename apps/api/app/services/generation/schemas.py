@@ -138,9 +138,10 @@ EPICS_SCHEMA: dict[str, object] = {
                 "required": ["title", "description", "business_value", "source_chunk_ids"],
                 "additionalProperties": False,
             },
-        }
+        },
+        "suggested_tag": {"type": "string"},
     },
-    "required": ["epics"],
+    "required": ["epics", "suggested_tag"],
     "additionalProperties": False,
 }
 

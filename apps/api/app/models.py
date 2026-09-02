@@ -275,6 +275,12 @@ class Source(Base):
     previousVersionId: Mapped[str | None] = mapped_column(
         ForeignKey("Source.id"), nullable=True
     )
+    # Stamped once this source's fragments are sent to a generate_epics pass —
+    # excludes it from future runs' input. Set once, never derived from
+    # DraftItem/TraceLink state (see GenerationRun.tag docstring context).
+    generatedInRunId: Mapped[str | None] = mapped_column(
+        ForeignKey("GenerationRun.id"), nullable=True
+    )
     createdAt: Mapped[datetime] = mapped_column(DateTime)
     updatedAt: Mapped[datetime] = mapped_column(DateTime)
     deletedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -580,6 +586,8 @@ class GenerationRun(Base):
         default=GenerationRunStage.COMPLETE,
     )
     summarizedFragmentsBlock: Mapped[str | None] = mapped_column(String, nullable=True)
+    tag: Mapped[str | None] = mapped_column(String, nullable=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
     stats: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)

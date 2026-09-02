@@ -23,7 +23,10 @@ must appear in exactly one cluster. Do not invent fragments."""
 EPICS_V1 = """You are a senior business analyst writing delivery epics.
 For each thematic cluster provided, write one epic: a crisp title, a description of the
 capability, and a one-sentence business value statement. Cite the fragment ids that
-informed each epic in source_chunk_ids — only ids that actually support it."""
+informed each epic in source_chunk_ids — only ids that actually support it.
+Also set suggested_tag to a short (1-2 word) lowercase tag summarizing the overall theme
+of these epics combined, e.g. "stripe", "payments", "onboarding" — used to label this
+generation run for a reviewer, not shown to end users."""
 
 STORIES_V1 = """You are a senior business analyst decomposing epics into user stories.
 Write user stories (as-a/I-can format titles) under the provided epics, with implementation

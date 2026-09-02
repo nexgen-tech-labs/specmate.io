@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from types import SimpleNamespace
@@ -80,7 +80,7 @@ class FakeAdapter:
             }
         elif props == {"clusters"}:
             data = {"clusters": [{"theme": "Payments", "chunk_ids": c}]}
-        elif props == {"epics"}:
+        elif props == {"epics", "suggested_tag"}:
             data = {
                 "epics": [
                     {
@@ -89,7 +89,8 @@ class FakeAdapter:
                         "business_value": "Reduces manual invoicing cost.",
                         "source_chunk_ids": [c[0], c[1]],
                     }
-                ]
+                ],
+                "suggested_tag": "payments",
             }
         elif props == {"stories"}:
             data = {
@@ -282,6 +283,48 @@ async def _create_large_fixture() -> dict[str, object]:
         await engine.dispose()
 
 
+async def _add_source(
+    project_id: str, name: str, texts: list[tuple[str, str]]
+) -> dict[str, object]:
+    """Adds a second source (+ fragments) to an existing project — used by the
+    source-scoping tests to prove a later generate_epics call only processes
+    the newly added source, not content already claimed by a prior run."""
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            source = Source(
+                projectId=project_id, name=name, kind="DOCX", storageKey="k",
+                createdAt=_now(), updatedAt=_now(),
+            )
+            session.add(source)
+            await session.flush()
+            source_id = source.id
+            chunk_ids: list[str] = []
+            for order, (text, path) in enumerate(texts):
+                fragment = RawRequirement(
+                    sourceId=source_id, text=text, sectionPath=path, order=order,
+                    createdAt=_now(), updatedAt=_now(),
+                )
+                session.add(fragment)
+                await session.flush()
+                chunk_ids.append(fragment.id)
+            await session.commit()
+            return {"source_id": source_id, "chunk_ids": chunk_ids}
+    finally:
+        await engine.dispose()
+
+
+async def _get_source_generated_run_id(source_id: str) -> str | None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            source = await session.get(Source, source_id)
+            assert source is not None
+            return source.generatedInRunId
+    finally:
+        await engine.dispose()
+
+
 async def _cleanup(ids: dict[str, object]) -> None:
     engine = create_async_engine(settings.database_url)
     try:
@@ -297,10 +340,22 @@ async def _cleanup(ids: dict[str, object]) -> None:
                 await session.execute(delete(DraftItem).where(DraftItem.id.in_(item_ids)))
             await session.execute(delete(GenerationRun).where(GenerationRun.projectId == project_id))
             await session.execute(delete(ReferenceItem).where(ReferenceItem.projectId == project_id))
-            await session.execute(
-                delete(RawRequirement).where(RawRequirement.sourceId == str(ids["source_id"]))
-            )
-            await session.execute(delete(Source).where(Source.id == str(ids["source_id"])))
+            source_ids = [
+                s.id
+                for s in (
+                    await session.execute(select(Source).where(Source.projectId == project_id))
+                ).scalars()
+            ]
+            if source_ids:
+                await session.execute(
+                    delete(RawRequirement).where(RawRequirement.sourceId.in_(source_ids))
+                )
+                # Clear generatedInRunId first — GenerationRun rows above may
+                # already be gone, but the FK is enforced either way.
+                await session.execute(
+                    update(Source).where(Source.id.in_(source_ids)).values(generatedInRunId=None)
+                )
+                await session.execute(delete(Source).where(Source.id.in_(source_ids)))
             await session.execute(delete(Project).where(Project.id == project_id))
             await purge_audit_events(session, str(ids["workspace_id"]))
             await session.execute(delete(Workspace).where(Workspace.id == str(ids["workspace_id"])))
@@ -522,9 +577,11 @@ def test_generate_downstream_returns_409_when_already_complete() -> None:
     asyncio.run(_cleanup(ids))
 
 
-def test_generate_idempotent_while_epics_pending_review() -> None:
-    """Re-calling /generate with unchanged content while the run is still
-    EPICS_PENDING_REVIEW returns the same run, not a duplicate epic set."""
+def test_generate_again_with_no_new_sources_raises_clear_error() -> None:
+    """Source-scoped generation (each source is claimed by exactly one run, via
+    generatedInRunId) means re-calling /generate with nothing new to process no
+    longer silently reuses the prior run — it raises a clear 422 telling the
+    reviewer to add a new source or remove an existing one."""
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
     project_id = str(ids["project_id"])
@@ -538,10 +595,176 @@ def test_generate_idempotent_while_epics_pending_review() -> None:
         _clear_override()
 
     assert first.json()["reused_existing_run"] is False
-    assert second.json()["reused_existing_run"] is True
-    assert second.json()["run_id"] == first.json()["run_id"]
-    assert second.json()["stage"] == "EPICS_PENDING_REVIEW"
+    assert second.status_code == 422
+    assert "already been included" in second.json()["detail"]
     assert len(asyncio.run(_fetch_items(project_id))) == 1  # still just the one epic
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_response_includes_ai_suggested_tag_and_name() -> None:
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        response = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+
+    body = response.json()
+    assert body["tag"] == "payments"
+    assert body["name"] is not None
+    assert body["name"].endswith("-payments-generated01")
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_epics_stamps_contributing_sources() -> None:
+    """A source's fragments are marked as claimed by the run the moment epics
+    are persisted — not deferred to generate_downstream's COMPLETE stage —
+    so a second generate_epics call while this run is still pending review
+    can't reprocess the same content."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+    source_id = str(ids["source_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        response = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+
+    run_id = response.json()["run_id"]
+    assert asyncio.run(_get_source_generated_run_id(source_id)) == run_id
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_second_generate_only_processes_the_newly_added_source() -> None:
+    """Adding a new source and generating again must not re-cluster/re-epic
+    the first source's already-claimed content — this is the mechanism that
+    replaces cross-run dedup for preventing near-duplicate epics."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids_a = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids_a)
+    try:
+        first = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+    assert first.json()["stats"]["fragment_count"] == 3
+    _dispose_app_engine()
+
+    new_source = asyncio.run(
+        _add_source(
+            project_id,
+            "extra.docx",
+            [
+                ("A brand-new requirement about billing.", "p.1"),
+                ("Billing invoices must support multiple currencies.", "p.2"),
+            ],
+        )
+    )
+    chunk_ids_b = list(map(str, new_source["chunk_ids"]))  # type: ignore[arg-type]
+
+    client = _client_with_fake(chunk_ids_b)
+    try:
+        second = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+
+    second_body = second.json()
+    assert second_body["run_id"] != first.json()["run_id"]
+    assert second_body["stats"]["fragment_count"] == 2  # only the new source's fragments
+    assert asyncio.run(_get_source_generated_run_id(str(new_source["source_id"]))) == (
+        second_body["run_id"]
+    )
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_downstream_only_uses_its_own_run_sources() -> None:
+    """Once two runs exist for the same project (each having claimed a
+    different source), generate_downstream for the first run must not pull in
+    the second run's source content."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids_a = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids_a)
+    try:
+        first_response = client.post(f"/projects/{project_id}/generate", json={})
+        first_run_id = first_response.json()["run_id"]
+        _dispose_app_engine()
+        asyncio.run(_approve_all_epics(project_id))
+        downstream_response = client.post(
+            f"/generation-runs/{first_run_id}/generate-downstream", json={}
+        )
+    finally:
+        _clear_override()
+
+    downstream_stats = downstream_response.json()["stats"]
+    # fragment_count in the final stats reflects only this run's own source
+    # (the fixture's 3 fragments) — a second source added afterward must not
+    # leak into a run that already completed its epics pass beforehand.
+    assert downstream_stats["fragment_count"] == 3
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_patch_generation_run_renames_tag_and_name() -> None:
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        generate_response = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+    run_id = generate_response.json()["run_id"]
+
+    client = TestClient(app)
+    patch_response = client.patch(
+        f"/generation-runs/{run_id}", json={"tag": "billing", "name": "custom-name"}
+    )
+    _dispose_app_engine()
+
+    assert patch_response.status_code == 200
+    body = patch_response.json()
+    assert body["tag"] == "billing"
+    assert body["name"] == "custom-name"
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_patch_generation_run_returns_404_for_unknown_run() -> None:
+    client = TestClient(app)
+    response = client.patch("/generation-runs/does-not-exist", json={"name": "x"})
+    _dispose_app_engine()
+    assert response.status_code == 404
+
+
+def test_patch_generation_run_rejects_empty_name() -> None:
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        generate_response = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+    run_id = generate_response.json()["run_id"]
+
+    client = TestClient(app)
+    response = client.patch(f"/generation-runs/{run_id}", json={"name": "   "})
+    _dispose_app_engine()
+    assert response.status_code == 422
 
     asyncio.run(_cleanup(ids))
 
@@ -925,7 +1148,7 @@ def _fake_claude_response_for(request_body: dict[str, object], chunk_ids: list[s
     props = set(schema.get("properties", {}))
     if props == {"clusters"}:
         data: dict[str, object] = {"clusters": [{"theme": "Payments", "chunk_ids": c}]}
-    elif props == {"epics"}:
+    elif props == {"epics", "suggested_tag"}:
         data = {
             "epics": [
                 {
@@ -934,7 +1157,8 @@ def _fake_claude_response_for(request_body: dict[str, object], chunk_ids: list[s
                     "business_value": "Reduces manual invoicing cost.",
                     "source_chunk_ids": [c[0], c[1]],
                 }
-            ]
+            ],
+            "suggested_tag": "payments",
         }
     elif props == {"stories"}:
         data = {

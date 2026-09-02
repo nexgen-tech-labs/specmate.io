@@ -434,6 +434,12 @@ model Source {
   // Source + RawRequirements stay queryable/untouched. version=1 for originals.
   version           Int          @default(1)
   previousVersionId String?
+  // Stamped once this source's fragments are actually sent to a generate_epics
+  // pass (not just parsed) — excludes it from future generation runs' input so
+  // adding a new source doesn't re-cluster/re-epic already-processed content.
+  // Deliberately a stored flag, not derived from live DraftItem/TraceLink rows:
+  // it must survive a reviewer later rejecting every item that resulted from it.
+  generatedInRunId  String?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
   deletedAt         DateTime?
@@ -444,6 +450,7 @@ model Source {
   previousVersion Source?          @relation("SourceVersionChain", fields: [previousVersionId], references: [id])
   nextVersions    Source[]         @relation("SourceVersionChain")
   diffs           SourceDiff[]
+  generatedInRun  GenerationRun?   @relation(fields: [generatedInRunId], references: [id])
 
   @@unique([projectId, externalRef])
 }
@@ -711,11 +718,18 @@ model GenerationRun {
   // the summarization LLM calls — null when the raw fragments block never
   // exceeded the size budget.
   summarizedFragmentsBlock String?
+  // AI-suggested short slug from the epics pass (e.g. "stripe") and the full
+  // display name built from it (e.g. "engg101project-stripe-generated01") —
+  // both user-editable afterward via PATCH /generation-runs/{id}. Null on
+  // historical runs predating this field.
+  tag                      String?
+  name                     String?
   stats                    Json?
   createdAt                DateTime           @default(now())
   updatedAt                DateTime           @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id])
+  project Project  @relation(fields: [projectId], references: [id])
+  sources Source[]
 
   @@unique([projectId, contentHash])
 }
