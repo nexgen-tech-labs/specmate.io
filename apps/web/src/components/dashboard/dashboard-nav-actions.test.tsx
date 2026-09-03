@@ -15,6 +15,7 @@ const SOURCE: SourceSummaryItem = {
   status: 'PARSED',
   createdAt: new Date(),
   projectId: 'proj-1',
+  isGenerated: false,
 };
 
 describe('SourcesCardWithNav', () => {

@@ -16,6 +16,10 @@ export interface SourceRow {
   // surfaces the "regenerate delta" / "review delta" actions.
   isNewVersion: boolean;
   hasDiff: boolean;
+  // Set once this source's fragments have been sent to a generate_epics pass —
+  // future generation runs skip it, so a BA can see at a glance which sources
+  // still need a fresh Generate click to be picked up.
+  isGenerated: boolean;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -110,6 +114,11 @@ export function SourceList({
                 </span>
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {source.isGenerated ? (
+                  <span className="rounded bg-green-soft px-2 py-0.5 font-mono text-xs font-bold tracking-wide text-green">
+                    GENERATED
+                  </span>
+                ) : null}
                 <span
                   className={`rounded px-2 py-0.5 font-mono text-xs font-bold tracking-wide ${
                     STATUS_STYLES[source.status] ?? 'text-sub bg-paper'

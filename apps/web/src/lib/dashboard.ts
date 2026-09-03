@@ -98,6 +98,8 @@ export interface SourceSummaryItem {
   // dashboard aggregates sources across every accessible project, so unlike
   // the project-scoped sources page, projectId isn't implicit from the route.
   projectId: string;
+  // Set once this source's fragments have been sent to a generate_epics pass.
+  isGenerated: boolean;
 }
 
 export async function getSourcesSummary(
@@ -112,10 +114,29 @@ export async function getSourcesSummary(
       where: { deletedAt: null, ...where },
       orderBy: { createdAt: 'desc' },
       take,
-      select: { id: true, name: true, kind: true, status: true, createdAt: true, projectId: true },
+      select: {
+        id: true,
+        name: true,
+        kind: true,
+        status: true,
+        createdAt: true,
+        projectId: true,
+        generatedInRunId: true,
+      },
     }),
   ]);
-  return { total, recent };
+  return {
+    total,
+    recent: recent.map((s) => ({
+      id: s.id,
+      name: s.name,
+      kind: s.kind,
+      status: s.status,
+      createdAt: s.createdAt,
+      projectId: s.projectId,
+      isGenerated: s.generatedInRunId !== null,
+    })),
+  };
 }
 
 export interface AwaitingReviewSummary {

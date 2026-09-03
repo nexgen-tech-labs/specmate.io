@@ -77,6 +77,11 @@ export function SourcesCard({
               <div className="mb-1 text-sm font-bold break-words tracking-tight text-ink">
                 {source.name}
               </div>
+              {source.isGenerated ? (
+                <span className="rounded bg-green-soft px-1.5 py-0.5 font-mono text-[10px] font-bold tracking-wide text-green">
+                  GENERATED
+                </span>
+              ) : null}
             </div>
           ))}
         </div>

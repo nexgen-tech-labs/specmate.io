@@ -50,6 +50,7 @@ export default async function ProjectSourcesPage({
     updatedAt: source.updatedAt.toISOString(),
     isNewVersion: source.previousVersionId !== null,
     hasDiff: diffSourceIds.has(source.id),
+    isGenerated: source.generatedInRunId !== null,
   }));
 
   const fragmentTotal = rows.reduce((sum, row) => sum + row.fragmentCount, 0);
