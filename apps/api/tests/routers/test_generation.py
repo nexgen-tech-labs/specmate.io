@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import anthropic
+import pytest
 import httpx
 
 from app.core import db as db_module
@@ -170,6 +171,10 @@ class FakeAdapter:
             latency_ms=5,
             model="fake-model",
             prompt_version="generation_v1",
+            # Non-zero so tests can confirm the pipeline actually threads these
+            # through into GenerationRun instead of discarding them (Issue #115).
+            queue_wait_seconds=0.5,
+            queue_depth_at_submit=2,
         )
 
 
@@ -466,6 +471,14 @@ def test_full_generation_run_produces_hierarchy_traces_scores_and_flags() -> Non
     assert stats["untraced_items"] == 1  # the uncited assumption
     assert stats["source_coverage"] == 1.0  # all three fragments cited somewhere
 
+    # Queueing observability (Issue #115): accumulated across both the epics
+    # phase (clustering + epics = 2 calls) and the downstream phase (stories +
+    # supporting + scoring = 3 calls), each call contributing 0.5s from
+    # FakeAdapter — so the total should be 5 * 0.5 = 2.5s, and the max depth
+    # should be FakeAdapter's constant 2.
+    assert stats["queue_wait_seconds_total"] == pytest.approx(2.5)
+    assert stats["queue_depth_at_submit_max"] == 2
+
     items = asyncio.run(_fetch_items(project_id))
     by_title = {i.title: i for i in items}
 
@@ -617,6 +630,28 @@ def test_generate_response_includes_ai_suggested_tag_and_name() -> None:
     assert body["tag"] == "payments"
     assert body["name"] is not None
     assert body["name"].endswith("-payments-generated01")
+
+    asyncio.run(_cleanup(ids))
+
+
+def test_generate_epics_response_surfaces_queue_metrics() -> None:
+    """The epics-only response (before any downstream call) must already
+    reflect the clustering+epics passes' queue-wait data (Issue #115) — not
+    just the final downstream response."""
+    ids = asyncio.run(_create_fixture())
+    chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
+    project_id = str(ids["project_id"])
+
+    client = _client_with_fake(chunk_ids)
+    try:
+        response = client.post(f"/projects/{project_id}/generate", json={})
+    finally:
+        _clear_override()
+
+    stats = response.json()["stats"]
+    # Clustering + epics = 2 calls, each contributing 0.5s from FakeAdapter.
+    assert stats["queue_wait_seconds_total"] == pytest.approx(1.0)
+    assert stats["queue_depth_at_submit_max"] == 2
 
     asyncio.run(_cleanup(ids))
 

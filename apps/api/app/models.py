@@ -588,6 +588,12 @@ class GenerationRun(Base):
     summarizedFragmentsBlock: Mapped[str | None] = mapped_column(String, nullable=True)
     tag: Mapped[str | None] = mapped_column(String, nullable=True)
     name: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Fair-use queueing observability (Issue #115) — accumulated across both
+    # generate_epics and generate_downstream, since `stats` is fully
+    # overwritten by each phase and would otherwise lose the earlier phase's
+    # queue-wait numbers.
+    queueWaitSecondsTotal: Mapped[float] = mapped_column(Float, default=0.0)
+    queueDepthAtSubmitMax: Mapped[int] = mapped_column(Integer, default=0)
     stats: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -82,8 +83,11 @@ from app.services.generation.schemas import (
 )
 from app.services.generation.similarity import find_best_duplicate
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_DUPLICATE_THRESHOLD = 0.55
 _GAP_SCORE_TRIGGER = 60  # completeness/specificity below this + a gap_question => gap flag
+_QUEUE_WAIT_WARN_SECONDS = 10.0  # log line when a single call waited this long (Issue #115)
 
 
 class GenerationError(Exception):
@@ -119,6 +123,22 @@ def _fragments_block(fragments: list[RawRequirement]) -> str:
     return "\n".join(f"[{f.id}] ({f.sectionPath}) {f.text}" for f in fragments)
 
 
+@dataclass
+class _QueueMetrics:
+    """Accumulates AIScheduler's fair-use queueing stats (Issue 12.3) across
+    every adapter.generate() call in a phase — computed correctly by
+    SchedulingAdapter but silently discarded by _call() until Issue #115.
+    Summed (not per-pass) since a phase can make a variable number of calls
+    (the summarization pre-pass fires once per batch)."""
+
+    wait_seconds_total: float = 0.0
+    depth_at_submit_max: int = 0
+
+    def record(self, wait_seconds: float, depth_at_submit: int) -> None:
+        self.wait_seconds_total += wait_seconds
+        self.depth_at_submit_max = max(self.depth_at_submit_max, depth_at_submit)
+
+
 async def _call(
     adapter: AIAdapter,
     task: str,
@@ -127,6 +147,7 @@ async def _call(
     schema: dict[str, object],
     workspace_id: str,
     project_id: str,
+    queue_metrics: _QueueMetrics | None = None,
 ) -> dict[str, object]:
     result = await adapter.generate(
         GenerationRequest(
@@ -139,6 +160,16 @@ async def _call(
             prompt_version=GENERATION_PROMPT_VERSION,
         )
     )
+    if queue_metrics is not None:
+        queue_metrics.record(result.queue_wait_seconds, result.queue_depth_at_submit)
+    if result.queue_wait_seconds >= _QUEUE_WAIT_WARN_SECONDS:
+        logger.warning(
+            "AI call for task=%s queued %.1fs (depth_at_submit=%d) in workspace=%s",
+            task,
+            result.queue_wait_seconds,
+            result.queue_depth_at_submit,
+            workspace_id,
+        )
     return result.data
 
 
@@ -314,6 +345,7 @@ async def _maybe_summarize(
     adapter: AIAdapter,
     workspace_id: str,
     project_id: str,
+    queue_metrics: _QueueMetrics,
 ) -> str | None:
     """If `block` exceeds the character budget, batches fragments and
     summarizes each batch into a dense digest that still cites real fragment
@@ -334,6 +366,7 @@ async def _maybe_summarize(
             SUMMARIZE_SCHEMA,
             workspace_id,
             project_id,
+            queue_metrics,
         )
         for d in cast(list[dict[str, object]], result.get("digests", [])):
             raw_ids = cast(list[str], d.get("source_chunk_ids", []))
@@ -395,16 +428,26 @@ async def generate_epics(
     fragment_source = {f.id: f.sourceId for f in fragments}
     raw_block = _fragments_block(fragments)
     ws_id = project.workspaceId
+    queue_metrics = _QueueMetrics()
 
     # Chunking/summarization pre-pass (only for genuinely large sources — see
     # chunking.py's character budget) — summarize once here, cache the digest
     # on the run, and generate_downstream reuses it instead of re-summarizing.
-    summarized_block = await _maybe_summarize(fragments, raw_block, adapter, ws_id, project_id)
+    summarized_block = await _maybe_summarize(
+        fragments, raw_block, adapter, ws_id, project_id, queue_metrics
+    )
     block = summarized_block or raw_block
 
     # Pass 1: cluster
     cluster_data = await _call(
-        adapter, "clustering", CLUSTERING_V1, f"Fragments:\n{block}", CLUSTER_SCHEMA, ws_id, project_id
+        adapter,
+        "clustering",
+        CLUSTERING_V1,
+        f"Fragments:\n{block}",
+        CLUSTER_SCHEMA,
+        ws_id,
+        project_id,
+        queue_metrics,
     )
     clusters = cast(list[dict[str, object]], cluster_data.get("clusters", []))
 
@@ -418,6 +461,7 @@ async def generate_epics(
         EPICS_SCHEMA,
         ws_id,
         project_id,
+        queue_metrics,
     )
     epics_raw = cast(list[dict[str, object]], epics_data.get("epics", []))
     epics = [
@@ -477,6 +521,8 @@ async def generate_epics(
         "source_coverage": None,  # unknown until downstream passes cite the remaining fragments
         "fragment_count": len(fragments),
     }
+    run.queueWaitSecondsTotal = queue_metrics.wait_seconds_total
+    run.queueDepthAtSubmitMax = queue_metrics.depth_at_submit_max
     record_audit_event(
         session,
         workspace_id=project.workspaceId,
@@ -545,6 +591,7 @@ async def generate_downstream(
     # cost/latency and any risk of the two phases seeing different summaries
     # of the same source.
     block = run.summarizedFragmentsBlock or _fragments_block(fragments)
+    queue_metrics = _QueueMetrics()
 
     # Pass 3: stories + tasks, scoped to approved epics only.
     epics_text = "\n".join(f"[{i}] {e.title}" for i, e in enumerate(epic_rows))
@@ -556,6 +603,7 @@ async def generate_downstream(
         STORIES_SCHEMA,
         ws_id,
         project_id,
+        queue_metrics,
     )
     stories: list[_Draft] = []
     tasks: list[_Draft] = []
@@ -593,6 +641,7 @@ async def generate_downstream(
         SUPPORTING_SCHEMA,
         ws_id,
         project_id,
+        queue_metrics,
     )
     supporting: list[_Draft] = []
     wanted = item_types  # None => all
@@ -624,7 +673,14 @@ async def generate_downstream(
         for i, d in enumerate(downstream_drafts)
     )
     scoring_data = await _call(
-        adapter, "scoring", SCORING_V1, f"Items:\n{items_text}", SCORING_SCHEMA, ws_id, project_id
+        adapter,
+        "scoring",
+        SCORING_V1,
+        f"Items:\n{items_text}",
+        SCORING_SCHEMA,
+        ws_id,
+        project_id,
+        queue_metrics,
     )
     for score in cast(list[dict[str, object]], scoring_data.get("scores", [])):
         idx = int(cast(int, score.get("item_index", -1)))
@@ -705,6 +761,10 @@ async def generate_downstream(
         "source_coverage": round(len(cited_ids) / len(fragments), 3) if fragments else 0,
         "fragment_count": len(fragments),
     }
+    # Added to (not replacing) the epics phase's totals — run.stats is fully
+    # overwritten each phase, but these columns accumulate across both.
+    run.queueWaitSecondsTotal += queue_metrics.wait_seconds_total
+    run.queueDepthAtSubmitMax = max(run.queueDepthAtSubmitMax, queue_metrics.depth_at_submit_max)
     run.stage = GenerationRunStage.COMPLETE
     run.updatedAt = now
 

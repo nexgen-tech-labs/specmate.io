@@ -724,6 +724,13 @@ model GenerationRun {
   // historical runs predating this field.
   tag                      String?
   name                     String?
+  // Fair-use queueing observability (Issue #115) — AIScheduler computes these
+  // per adapter.generate() call, but they were being silently discarded.
+  // Accumulated across both generate_epics and generate_downstream (separate
+  // requests/transactions, unlike `stats` which each phase fully overwrites)
+  // so the totals reflect the whole run, not just its most recent phase.
+  queueWaitSecondsTotal    Float              @default(0)
+  queueDepthAtSubmitMax    Int                @default(0)
   stats                    Json?
   createdAt                DateTime           @default(now())
   updatedAt                DateTime           @updatedAt

@@ -58,6 +58,20 @@ def _now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+def _stats_with_queue_metrics(run: GenerationRun) -> dict[str, object] | None:
+    """Folds the queueing-observability columns (Issue #115) into the stats
+    dict returned to callers — kept off the persisted `stats` JSONB itself
+    since that column is fully overwritten by each generation phase, while
+    these two columns accumulate across both."""
+    if run.stats is None:
+        return None
+    return {
+        **run.stats,
+        "queue_wait_seconds_total": run.queueWaitSecondsTotal,
+        "queue_depth_at_submit_max": run.queueDepthAtSubmitMax,
+    }
+
+
 class GenerateBody(BaseModel):
     pass
 
@@ -102,7 +116,7 @@ async def generate(
         run_id=run.id,
         stage=run.stage.value,
         reused_existing_run=after == before,
-        stats=run.stats,
+        stats=_stats_with_queue_metrics(run),
         tag=run.tag,
         name=run.name,
     )
@@ -148,7 +162,9 @@ async def generate_downstream_endpoint(
     except AIGenerationError as exc:
         raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
 
-    return GenerateDownstreamResponse(run_id=run.id, stage=run.stage.value, stats=run.stats)
+    return GenerateDownstreamResponse(
+        run_id=run.id, stage=run.stage.value, stats=_stats_with_queue_metrics(run)
+    )
 
 
 class UpdateGenerationRunBody(BaseModel):
