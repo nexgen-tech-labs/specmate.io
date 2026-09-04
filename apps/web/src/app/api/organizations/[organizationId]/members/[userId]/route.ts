@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { requireOrganizationRole } from '@/lib/workspace-context';
+import { withSerializableRetry } from '@/lib/serializable-transaction';
 
 type Params = { params: Promise<{ organizationId: string; userId: string }> };
+
+class LastOwnerError extends Error {}
 
 // Offboarding (Issue 12.12 AC 3): removes a departing user's access
 // org-wide in one transaction — OrganizationMember + every WorkspaceMember
@@ -27,22 +30,6 @@ export async function DELETE(_request: Request, { params }: Params) {
     );
   }
 
-  // Never leave an org with zero OWNERs — that org becomes permanently
-  // unable to perform OWNER-gated actions (billing, workspace lifecycle),
-  // since no route lets anyone self-promote to OWNER. Applies whether an
-  // OWNER is offboarding themselves or another OWNER.
-  if (targetMembership.role === 'OWNER') {
-    const ownerCount = await prisma.organizationMember.count({
-      where: { organizationId, role: 'OWNER' },
-    });
-    if (ownerCount <= 1) {
-      return NextResponse.json(
-        { error: 'Cannot remove the last owner of an organization.' },
-        { status: 409 },
-      );
-    }
-  }
-
   const workspaces = await prisma.workspace.findMany({
     where: { organizationId },
     select: { id: true },
@@ -61,35 +48,69 @@ export async function DELETE(_request: Request, { params }: Params) {
       : [];
   const affectedWorkspaceIds = affectedMemberships.map((m) => m.workspaceId);
 
-  await prisma.$transaction(async (tx) => {
-    if (workspaceIds.length > 0) {
-      const teamIds = (
-        await tx.team.findMany({
-          where: { workspaceId: { in: workspaceIds } },
-          select: { id: true },
-        })
-      ).map((t) => t.id);
-      if (teamIds.length > 0) {
-        await tx.teamMember.deleteMany({ where: { userId, teamId: { in: teamIds } } });
-      }
-      await tx.workspaceMember.deleteMany({ where: { userId, workspaceId: { in: workspaceIds } } });
-    }
-    await tx.organizationMember.deleteMany({ where: { organizationId, userId } });
+  try {
+    await withSerializableRetry(() =>
+      prisma.$transaction(
+        async (tx) => {
+          // Never leave an org with zero OWNERs — that org becomes permanently
+          // unable to perform OWNER-gated actions (billing, workspace
+          // lifecycle), since no route lets anyone self-promote to OWNER.
+          // Applies whether an OWNER is offboarding themselves or another
+          // OWNER. Re-checked here (inside the transaction, Serializable
+          // isolation) rather than before it — otherwise two concurrent
+          // removals of two different OWNERs in a 2-OWNER org could each read
+          // the pre-removal count, both pass, and both proceed (Issue #113).
+          if (targetMembership.role === 'OWNER') {
+            const ownerCount = await tx.organizationMember.count({
+              where: { organizationId, role: 'OWNER' },
+            });
+            if (ownerCount <= 1) {
+              throw new LastOwnerError();
+            }
+          }
 
-    for (const workspaceId of affectedWorkspaceIds) {
-      await tx.auditEvent.create({
-        data: {
-          workspaceId,
-          actorUserId: access.membership.userId,
-          actorType: 'USER',
-          action: 'user.offboarded',
-          entityType: 'User',
-          entityId: userId,
-          metadata: { organizationId },
+          if (workspaceIds.length > 0) {
+            const teamIds = (
+              await tx.team.findMany({
+                where: { workspaceId: { in: workspaceIds } },
+                select: { id: true },
+              })
+            ).map((t) => t.id);
+            if (teamIds.length > 0) {
+              await tx.teamMember.deleteMany({ where: { userId, teamId: { in: teamIds } } });
+            }
+            await tx.workspaceMember.deleteMany({
+              where: { userId, workspaceId: { in: workspaceIds } },
+            });
+          }
+          await tx.organizationMember.deleteMany({ where: { organizationId, userId } });
+
+          for (const workspaceId of affectedWorkspaceIds) {
+            await tx.auditEvent.create({
+              data: {
+                workspaceId,
+                actorUserId: access.membership.userId,
+                actorType: 'USER',
+                action: 'user.offboarded',
+                entityType: 'User',
+                entityId: userId,
+                metadata: { organizationId },
+              },
+            });
+          }
         },
-      });
+        { isolationLevel: 'Serializable' },
+      ),
+    );
+  } catch (err) {
+    if (err instanceof LastOwnerError) {
+      return NextResponse.json(
+        { error: 'Cannot remove the last owner of an organization.' },
+        { status: 409 },
+      );
     }
-  });
+    throw err;
+  }
 
   return NextResponse.json({ ok: true });
 }

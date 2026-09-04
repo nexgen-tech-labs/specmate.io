@@ -219,4 +219,46 @@ describe('DELETE /api/organizations/[organizationId]/members/[userId] — offboa
     expect(res.status).toBe(404);
     await prisma.user.delete({ where: { id: neverMember.id } });
   });
+
+  it("two concurrent removals of a 2-OWNER org's two OWNERs: exactly one succeeds, one is blocked, never zero OWNERs remain (Issue #113)", async () => {
+    const raceOrg = await prisma.organization.create({ data: { name: 'Race Owner Org' } });
+    const raceOwnerA = await prisma.user.create({
+      data: { email: `race-owner-a-${Date.now()}@test.local`, name: 'RaceA', passwordHash: 'x' },
+    });
+    const raceOwnerB = await prisma.user.create({
+      data: { email: `race-owner-b-${Date.now()}@test.local`, name: 'RaceB', passwordHash: 'x' },
+    });
+    await prisma.organizationMember.create({
+      data: { organizationId: raceOrg.id, userId: raceOwnerA.id, role: 'OWNER' },
+    });
+    await prisma.organizationMember.create({
+      data: { organizationId: raceOrg.id, userId: raceOwnerB.id, role: 'OWNER' },
+    });
+
+    // Both concurrent calls act as raceOwnerA (an OWNER, so authorized to
+    // remove either OWNER) — this reproduces the exact race from Issue #113:
+    // two concurrent removal requests targeting the org's two OWNERs, both
+    // reading the pre-removal count before either transaction commits.
+    currentSession = { user: { id: raceOwnerA.id } };
+    const [resA, resB] = await Promise.all([
+      DELETE(makeRequest(), {
+        params: Promise.resolve({ organizationId: raceOrg.id, userId: raceOwnerA.id }),
+      }),
+      DELETE(makeRequest(), {
+        params: Promise.resolve({ organizationId: raceOrg.id, userId: raceOwnerB.id }),
+      }),
+    ]);
+
+    const statuses = [resA.status, resB.status].sort();
+    expect(statuses).toEqual([200, 409]);
+
+    const remainingOwners = await prisma.organizationMember.count({
+      where: { organizationId: raceOrg.id, role: 'OWNER' },
+    });
+    expect(remainingOwners).toBe(1);
+
+    await prisma.organizationMember.deleteMany({ where: { organizationId: raceOrg.id } });
+    await prisma.organization.delete({ where: { id: raceOrg.id } });
+    await prisma.user.deleteMany({ where: { id: { in: [raceOwnerA.id, raceOwnerB.id] } } });
+  });
 });
