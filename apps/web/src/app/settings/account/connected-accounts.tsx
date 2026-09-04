@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 const PROVIDER_LABELS: Record<string, string> = {
   github: 'GitHub',
@@ -15,14 +15,35 @@ interface ConnectedAccount {
 
 export function ConnectedAccounts({
   initialAccounts,
-  hasPassword,
+  hasPassword: initialHasPassword,
 }: {
   initialAccounts: ConnectedAccount[];
   hasPassword: boolean;
 }) {
   const [accounts, setAccounts] = useState(initialAccounts);
+  const [hasPassword, setHasPassword] = useState(initialHasPassword);
   const [error, setError] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
+
+  // Refetch on window focus so a second tab's stale state (e.g. it still
+  // thinks 2 accounts are linked after this account was unlinked elsewhere)
+  // gets corrected before the reviewer can click an unlink button that the
+  // server would now reject — the 409 is still the actual safety net (a
+  // Serializable transaction), this just keeps the UI from lagging behind it.
+  useEffect(() => {
+    async function refresh() {
+      const res = await fetch('/api/account/connections');
+      if (!res.ok) return;
+      const body: { accounts?: ConnectedAccount[]; hasPassword?: boolean } = await res
+        .json()
+        .catch(() => ({}));
+      if (body.accounts) setAccounts(body.accounts);
+      if (typeof body.hasPassword === 'boolean') setHasPassword(body.hasPassword);
+    }
+    const onFocus = () => void refresh();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
 
   async function unlink(accountId: string) {
     setError(null);
