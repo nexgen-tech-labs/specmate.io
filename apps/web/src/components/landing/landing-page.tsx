@@ -10,7 +10,13 @@ import { StageStepper } from './stage-stepper';
 import { Mono } from './demo-ui';
 import { useDemoPlayback } from './use-demo-playback';
 
-export function LandingPage() {
+export function LandingPage({
+  remainingInvites,
+  totalInvites,
+}: {
+  remainingInvites: number | null;
+  totalInvites: number;
+}) {
   const {
     stage,
     playing,
@@ -27,7 +33,12 @@ export function LandingPage() {
 
   return (
     <div className="min-h-screen bg-paper text-ink">
-      <LandingHero playing={playing} onRunDemo={runDemo} />
+      <LandingHero
+        playing={playing}
+        onRunDemo={runDemo}
+        remainingInvites={remainingInvites}
+        totalInvites={totalInvites}
+      />
       <StageStepper stage={stage} playing={playing} onSelect={goto} />
 
       <main className="mx-auto max-w-[1120px] px-6 pt-6.5 pb-15">

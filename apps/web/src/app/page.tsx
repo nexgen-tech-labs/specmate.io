@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { auth } from '@/lib/auth';
 import { getPrimaryWorkspaceIdForUser } from '@/lib/workspace-context';
 import { LandingPage } from '@/components/landing/landing-page';
+import { ACCESS_REQUEST_CAP, getRemainingAccessRequestSlots } from '@/lib/access-requests';
 
 // Organization + SoftwareApplication JSON-LD (AI SEO) — the entity-recognition
 // signal AI Overviews/ChatGPT/Perplexity use to identify what SpecMate is,
@@ -38,13 +39,14 @@ export default async function Home() {
     const workspaceId = await getPrimaryWorkspaceIdForUser(session.user.id);
     redirect(workspaceId ? `/workspaces/${workspaceId}` : '/onboarding');
   }
+  const remainingInvites = await getRemainingAccessRequestSlots();
   return (
     <>
       <script
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(STRUCTURED_DATA) }}
       />
-      <LandingPage />
+      <LandingPage remainingInvites={remainingInvites} totalInvites={ACCESS_REQUEST_CAP} />
     </>
   );
 }
