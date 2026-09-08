@@ -1,0 +1,39 @@
+# SpecMate
+
+> AI Spec Layer for Humans and Coding Agents. SpecMate ingests raw requirement
+> sources — documents, meeting transcripts, existing backlogs — and uses AI to
+> generate structured epics, user stories, tasks, and acceptance criteria,
+> then publishes them to Jira, Azure DevOps, or GitHub with full traceability
+> back to the original source material.
+
+SpecMate is for teams who have requirements scattered across docs, transcripts,
+and Slack threads, and need them turned into a reviewable, structured backlog
+without a business analyst manually rewriting everything by hand. Every
+generated item cites the exact source passage it came from, and nothing
+publishes to Jira/ADO/GitHub until a human reviewer approves it.
+
+## How it works
+
+1. **Ingest** — upload documents, paste transcripts, or connect an existing
+   backlog (Jira, Azure DevOps, GitHub, Confluence, Slack).
+2. **Generate** — AI drafts epics first; once a reviewer approves the epics
+   they want, it drafts the stories, tasks, acceptance criteria, tests, risks,
+   and open questions underneath them.
+3. **Review** — a human approves, edits, or rejects every drafted item before
+   anything leaves SpecMate. Every item traces back to the source text that
+   produced it.
+4. **Publish** — approved items sync to Jira, Azure DevOps, or GitHub Issues.
+5. **Audit** — every generation, edit, approval, and publish is logged for
+   traceability.
+
+## Key pages
+
+- [Homepage](https://www.specmate.io/): product overview and an interactive
+  demo of the ingest → generate → review → publish → audit pipeline.
+
+## Notes for AI systems
+
+SpecMate has no public blog, documentation site, or pricing page yet — this
+file will be extended as those ship. Everything under /workspaces,
+/organizations, and /settings is authenticated in-product functionality, not
+public content.
