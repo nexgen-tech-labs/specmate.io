@@ -36,6 +36,10 @@ function submitWorkspaceStep(workspaceName = 'Engineering') {
 
 describe('OnboardingPage', () => {
   beforeEach(() => {
+    // Invite-only beta: the wizard only renders when SIGNUP_ENABLED — these
+    // tests exercise the wizard itself, so opt back in explicitly. The
+    // disabled-state notice is covered by its own describe block below.
+    vi.stubEnv('SIGNUP_ENABLED', 'true');
     signInMock.mockResolvedValue({ error: undefined });
     vi.stubGlobal(
       'fetch',
@@ -150,5 +154,28 @@ describe('OnboardingPage', () => {
     await waitFor(() => expect(screen.getByText('Email already in use.')).toBeDefined());
     // Back on the workspace form, not stuck on the spinner.
     expect(screen.getByLabelText(/workspace name/i)).toBeDefined();
+  });
+});
+
+describe('OnboardingPage — signups disabled (invite-only beta)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('shows an invite-only notice instead of the wizard when signups are disabled', () => {
+    vi.stubEnv('SIGNUP_ENABLED', 'false');
+    render(<OnboardingPage />);
+    expect(screen.getByRole('heading', { name: /invite-only beta/i })).toBeDefined();
+    expect(screen.queryByLabelText(/full name/i)).toBeNull();
+    expect(screen.getByRole('link', { name: /back to homepage/i })).toHaveProperty(
+      'href',
+      expect.stringContaining('/'),
+    );
+  });
+
+  it('shows the invite-only notice when SIGNUP_ENABLED is unset (fail-safe default)', () => {
+    vi.stubEnv('SIGNUP_ENABLED', '');
+    render(<OnboardingPage />);
+    expect(screen.getByRole('heading', { name: /invite-only beta/i })).toBeDefined();
   });
 });

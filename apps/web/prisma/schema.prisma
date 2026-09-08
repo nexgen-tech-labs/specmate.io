@@ -692,6 +692,48 @@ model OrganizationInvite {
   invitedBy    User         @relation(fields: [invitedByUserId], references: [id])
 }
 
+// Invite-only beta: a visitor requests access from the landing page before any
+// User/Organization/Workspace exists for them — deliberately separate from
+// WorkspaceInvite/OrganizationInvite above, which both presuppose a tenant
+// already exists and an authenticated user accepting into it. Reviewed
+// manually (founder approves/rejects); approval issues a SignupToken.
+enum AccessRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model AccessRequest {
+  id          String              @id @default(cuid())
+  email       String              @unique
+  companyName String
+  companySize OrgSize
+  // Free-text marketing capture: how they heard about SpecMate / intended use case.
+  howHeard    String?
+  status      AccessRequestStatus @default(PENDING)
+  reviewedAt  DateTime?
+  // Founder-only note (e.g. rejection reason) — never shown to the requester.
+  reviewNote  String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  signupToken SignupToken?
+}
+
+// One-time signup link generated when an AccessRequest is approved. Not a
+// WorkspaceInvite/OrganizationInvite — no tenant exists yet for this email.
+model SignupToken {
+  id              String    @id @default(cuid())
+  accessRequestId String    @unique
+  email           String
+  token           String    @unique
+  usedAt          DateTime?
+  expiresAt       DateTime
+  createdAt       DateTime  @default(now())
+
+  accessRequest AccessRequest @relation(fields: [accessRequestId], references: [id])
+}
+
 // Join record proving full traceability: Source -> RawRequirement -> DraftItem -> PublishedItem.
 // publishedItemId is nullable because a trace exists before a DraftItem is published.
 // One AI generation run over a project's RawRequirements (Issue 3.1). contentHash is

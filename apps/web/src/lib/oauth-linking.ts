@@ -12,6 +12,7 @@
  */
 import { prisma } from './prisma';
 import { createTenantForNewUser } from './create-tenant';
+import { isSignupEnabled } from './signup-gate';
 
 interface ResolveOAuthSignInInput {
   provider: string;
@@ -22,7 +23,9 @@ interface ResolveOAuthSignInInput {
 }
 
 type ResolveOAuthSignInResult =
-  { outcome: 'signed_in'; userId: string } | { outcome: 'blocked_existing_account' };
+  | { outcome: 'signed_in'; userId: string }
+  | { outcome: 'blocked_existing_account' }
+  | { outcome: 'signup_disabled' };
 
 export async function resolveOAuthSignIn(
   input: ResolveOAuthSignInInput,
@@ -48,6 +51,13 @@ export async function resolveOAuthSignIn(
   const matchingUser = await prisma.user.findUnique({ where: { email } });
 
   if (!matchingUser) {
+    // Invite-only beta: this is the auto-provisioning path for an identity
+    // that has never touched the system before — the same gate /api/signup
+    // enforces for credentials signup. Existing users (matched above by
+    // linked Account or by email) are completely unaffected.
+    if (!isSignupEnabled()) {
+      return { outcome: 'signup_disabled' };
+    }
     let user;
     try {
       ({ user } = await createTenantForNewUser({

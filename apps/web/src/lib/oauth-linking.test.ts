@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { prisma } from './prisma';
 import { resolveOAuthSignIn, resolveUserIdForOAuthAccount } from './oauth-linking';
 
@@ -7,6 +7,14 @@ describe('resolveOAuthSignIn', () => {
   const createdWorkspaceIds: string[] = [];
   const createdOrgIds: string[] = [];
   const createdAccountIds: string[] = [];
+
+  beforeEach(() => {
+    // Invite-only beta: brand-new-user auto-provisioning is gated behind
+    // SIGNUP_ENABLED, defaulting closed. These tests exercise the existing
+    // linking/provisioning behavior underneath the gate — the gate itself is
+    // covered by the dedicated 'signup disabled' tests below.
+    vi.stubEnv('SIGNUP_ENABLED', 'true');
+  });
 
   afterEach(async () => {
     await prisma.account.deleteMany({ where: { id: { in: createdAccountIds } } });
@@ -265,6 +273,83 @@ describe('resolveOAuthSignIn', () => {
     }
     const userCount = await prisma.user.count({ where: { email } });
     expect(userCount).toBe(1); // no duplicate User from the race
+  });
+
+  it('returns signup_disabled and creates nothing for a brand-new email when signups are disabled', async () => {
+    vi.stubEnv('SIGNUP_ENABLED', 'false');
+    const email = `oauth-disabled-${Date.now()}@test.local`;
+    const result = await resolveOAuthSignIn({
+      provider: 'github',
+      providerAccountId: `gh-disabled-${Date.now()}`,
+      email,
+      name: 'Should Not Exist',
+      emailVerifiedByProvider: true,
+    });
+    expect(result.outcome).toBe('signup_disabled');
+    const userCount = await prisma.user.count({ where: { email } });
+    expect(userCount).toBe(0);
+  });
+
+  it('still signs in an existing user by linked Account when signups are disabled', async () => {
+    const email = `oauth-existing-disabled-${Date.now()}@test.local`;
+    const providerAccountId = `gh-existing-disabled-${Date.now()}`;
+    const first = await resolveOAuthSignIn({
+      provider: 'github',
+      providerAccountId,
+      email,
+      name: 'Existing',
+      emailVerifiedByProvider: true,
+    });
+    expect(first.outcome).toBe('signed_in');
+    if (first.outcome === 'signed_in') {
+      createdUserIds.push(first.userId);
+      const acct = await prisma.account.findFirstOrThrow({ where: { userId: first.userId } });
+      createdAccountIds.push(acct.id);
+      const membership = await prisma.workspaceMember.findFirstOrThrow({
+        where: { userId: first.userId },
+      });
+      createdWorkspaceIds.push(membership.workspaceId);
+      const orgMembership = await prisma.organizationMember.findFirstOrThrow({
+        where: { userId: first.userId },
+      });
+      createdOrgIds.push(orgMembership.organizationId);
+    }
+
+    vi.stubEnv('SIGNUP_ENABLED', 'false');
+    const second = await resolveOAuthSignIn({
+      provider: 'github',
+      providerAccountId,
+      email,
+      name: 'Existing',
+      emailVerifiedByProvider: true,
+    });
+    expect(second.outcome).toBe('signed_in');
+    if (second.outcome === 'signed_in' && first.outcome === 'signed_in') {
+      expect(second.userId).toBe(first.userId);
+    }
+  });
+
+  it('still auto-links an existing verified-email User when signups are disabled', async () => {
+    const email = `oauth-link-disabled-${Date.now()}@test.local`;
+    const existingUser = await prisma.user.create({
+      data: { name: 'Existing', email, passwordHash: 'hashed' },
+    });
+    createdUserIds.push(existingUser.id);
+
+    vi.stubEnv('SIGNUP_ENABLED', 'false');
+    const result = await resolveOAuthSignIn({
+      provider: 'google',
+      providerAccountId: `g-link-disabled-${Date.now()}`,
+      email,
+      name: 'Existing',
+      emailVerifiedByProvider: true,
+    });
+    expect(result.outcome).toBe('signed_in');
+    if (result.outcome === 'signed_in') {
+      expect(result.userId).toBe(existingUser.id);
+      const account = await prisma.account.findFirstOrThrow({ where: { userId: existingUser.id } });
+      createdAccountIds.push(account.id);
+    }
   });
 });
 

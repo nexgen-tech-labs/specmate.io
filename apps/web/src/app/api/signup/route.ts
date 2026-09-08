@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { hashPassword } from '@/lib/password';
 import { createTenantForNewUser } from '@/lib/create-tenant';
+import { isSignupEnabled } from '@/lib/signup-gate';
 import type { OrgSize } from '@prisma/client';
 
 const VALID_ORG_SIZES: OrgSize[] = ['SOLO', 'SMALL', 'MEDIUM', 'LARGE', 'ENTERPRISE'];
@@ -35,6 +36,10 @@ function isValidBody(body: unknown): body is SignupBody {
 }
 
 export async function POST(request: Request) {
+  if (!isSignupEnabled()) {
+    return NextResponse.json({ error: 'Signups are currently invite-only.' }, { status: 403 });
+  }
+
   const body: unknown = await request.json();
   if (!isValidBody(body)) {
     return NextResponse.json({ error: 'Invalid signup details.' }, { status: 400 });

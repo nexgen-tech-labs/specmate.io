@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { prisma } from '@/lib/prisma';
 
 const { POST } = await import('./route');
@@ -28,6 +28,14 @@ describe('POST /api/signup', () => {
   let createdUserIds: string[] = [];
   let createdWorkspaceIds: string[] = [];
   let createdOrgIds: string[] = [];
+
+  beforeEach(() => {
+    // Invite-only beta: self-serve signup is gated behind SIGNUP_ENABLED,
+    // defaulting closed. These tests exercise the existing signup behavior
+    // underneath the gate, so opt back in explicitly — the gate itself is
+    // covered by the dedicated 'signup disabled' test below.
+    vi.stubEnv('SIGNUP_ENABLED', 'true');
+  });
 
   afterEach(async () => {
     await prisma.workspaceInvite.deleteMany({
@@ -118,5 +126,20 @@ describe('POST /api/signup', () => {
 
     const second = await POST(makeRequest(body));
     expect(second.status).toBe(409);
+  });
+
+  it('returns 403 and creates nothing when signups are disabled', async () => {
+    vi.stubEnv('SIGNUP_ENABLED', 'false');
+    const body = validBody();
+    const res = await POST(makeRequest(body));
+    expect(res.status).toBe(403);
+    const user = await prisma.user.findUnique({ where: { email: body.email } });
+    expect(user).toBeNull();
+  });
+
+  it('returns 403 when SIGNUP_ENABLED is unset (fail-safe default)', async () => {
+    vi.stubEnv('SIGNUP_ENABLED', '');
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(403);
   });
 });

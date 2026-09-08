@@ -50,6 +50,12 @@ function LoginFormInner() {
           provider from account settings.
         </p>
       ) : null}
+      {oauthError === 'SignupDisabled' ? (
+        <p className="mb-4 text-sm text-red">
+          Sign-ups are currently invite-only. Request access from the homepage and we&apos;ll follow
+          up.
+        </p>
+      ) : null}
 
       <label htmlFor="email" className="mb-2 block text-base font-semibold text-ink">
         Work email

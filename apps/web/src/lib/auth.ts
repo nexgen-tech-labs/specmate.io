@@ -122,6 +122,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (result.outcome === 'blocked_existing_account') {
         return '/login?error=AccountExists';
       }
+      if (result.outcome === 'signup_disabled') {
+        return '/login?error=SignupDisabled';
+      }
       // Returning a string here redirects the user there (Auth.js's own
       // mechanism — the separate `redirect` callback only receives
       // { url, baseUrl }, no user context, so it can't make this decision)
