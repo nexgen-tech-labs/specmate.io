@@ -66,4 +66,33 @@ describe('RequestAccessModal', () => {
     fireEvent.click(screen.getByText('Request access'));
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it('includes utmParams in the submitted body when provided', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <RequestAccessModal
+        onClose={vi.fn()}
+        utmParams={{ utmSource: 'twitter', utmMedium: 'social', utmCampaign: null }}
+      />,
+    );
+    fillForm();
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.utmSource).toBe('twitter');
+    expect(body.utmMedium).toBe('social');
+    expect(body.utmCampaign).toBeNull();
+  });
+
+  it('omits utm fields from the body when utmParams is not provided', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RequestAccessModal onClose={vi.fn()} />);
+    fillForm();
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.utmSource).toBeUndefined();
+  });
 });

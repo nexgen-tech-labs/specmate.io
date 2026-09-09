@@ -113,4 +113,49 @@ describe('POST /api/access-requests', () => {
     const stored = await prisma.accessRequest.findUniqueOrThrow({ where: { email: body.email } });
     expect(stored.status).toBe('APPROVED');
   });
+
+  it('stores UTM attribution when present', async () => {
+    const body = validBody({
+      utmSource: 'twitter',
+      utmMedium: 'social',
+      utmCampaign: 'launch-week',
+    });
+    createdEmails.push(body.email);
+    const res = await POST(makeRequest(body));
+    expect(res.status).toBe(201);
+
+    const stored = await prisma.accessRequest.findUniqueOrThrow({ where: { email: body.email } });
+    expect(stored.utmSource).toBe('twitter');
+    expect(stored.utmMedium).toBe('social');
+    expect(stored.utmCampaign).toBe('launch-week');
+  });
+
+  it('stores null UTM fields for direct traffic with no utm_* params', async () => {
+    const body = validBody();
+    createdEmails.push(body.email);
+    const res = await POST(makeRequest(body));
+    expect(res.status).toBe(201);
+
+    const stored = await prisma.accessRequest.findUniqueOrThrow({ where: { email: body.email } });
+    expect(stored.utmSource).toBeNull();
+    expect(stored.utmMedium).toBeNull();
+    expect(stored.utmCampaign).toBeNull();
+  });
+
+  it('preserves first-touch UTM attribution on resubmission rather than overwriting it', async () => {
+    const body = validBody({ utmSource: 'twitter', utmMedium: 'social' });
+    createdEmails.push(body.email);
+    await POST(makeRequest(body));
+
+    // Resubmit later with a different (or absent) utm_source — first-touch
+    // attribution should stick, not flip to whatever link they used this time.
+    const res = await POST(
+      makeRequest({ ...body, companyName: 'Acme Corp (updated)', utmSource: 'google' }),
+    );
+    expect(res.status).toBe(201);
+
+    const stored = await prisma.accessRequest.findUniqueOrThrow({ where: { email: body.email } });
+    expect(stored.utmSource).toBe('twitter');
+    expect(stored.companyName).toBe('Acme Corp (updated)');
+  });
 });

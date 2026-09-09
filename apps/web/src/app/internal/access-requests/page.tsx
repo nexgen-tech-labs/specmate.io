@@ -67,7 +67,14 @@ export default async function AccessRequestsPage() {
                 <span className="break-all font-semibold">{r.email}</span>
                 <span className="text-sub">{r.companyName}</span>
                 <span className="font-mono text-xs text-sub">{orgSizeLabel(r.companySize)}</span>
-                <span className="text-sub">{r.howHeard || '—'}</span>
+                <span className="text-sub">
+                  {r.howHeard || '—'}
+                  {r.utmSource ? (
+                    <span className="mt-1 block font-mono text-[10px] tracking-wide text-cobalt">
+                      via {[r.utmSource, r.utmMedium, r.utmCampaign].filter(Boolean).join(' / ')}
+                    </span>
+                  ) : null}
+                </span>
                 <span
                   className={`font-mono text-xs font-bold ${
                     r.status === 'APPROVED'

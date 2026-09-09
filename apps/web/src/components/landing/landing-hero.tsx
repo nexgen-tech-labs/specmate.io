@@ -1,14 +1,18 @@
-'use client';
-
-import { useState } from 'react';
 import { Eyebrow } from './demo-ui';
-import { RequestAccessModal } from './request-access-modal';
+import { RequestAccessModal, type UtmParams } from './request-access-modal';
 
 interface LandingHeroProps {
   playing: boolean;
   onRunDemo: () => void;
   remainingInvites: number | null;
   totalInvites: number;
+  // Controlled by the parent (LandingPage) rather than owned here, so
+  // ?request-access=1 deep links (from the site-wide header / Sign In
+  // modal's "Get started" links) can open this same modal instance.
+  showRequestAccess: boolean;
+  onShowRequestAccess: () => void;
+  onCloseRequestAccess: () => void;
+  utmParams: UtmParams;
 }
 
 export function LandingHero({
@@ -16,9 +20,11 @@ export function LandingHero({
   onRunDemo,
   remainingInvites,
   totalInvites,
+  showRequestAccess,
+  onShowRequestAccess,
+  onCloseRequestAccess,
+  utmParams,
 }: LandingHeroProps) {
-  const [showRequestAccess, setShowRequestAccess] = useState(false);
-
   return (
     <div className="mx-auto max-w-[1120px] px-6 pt-16 pb-4">
       <div className="mb-3 flex flex-wrap items-center gap-3">
@@ -41,7 +47,7 @@ export function LandingHero({
       <div className="mt-8 flex flex-wrap gap-3">
         <button
           type="button"
-          onClick={() => setShowRequestAccess(true)}
+          onClick={onShowRequestAccess}
           className="inline-block rounded-md bg-cobalt px-7 py-3.5 text-lg font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cobalt"
         >
           Request access →
@@ -57,7 +63,7 @@ export function LandingHero({
         </button>
       </div>
       {showRequestAccess ? (
-        <RequestAccessModal onClose={() => setShowRequestAccess(false)} />
+        <RequestAccessModal onClose={onCloseRequestAccess} utmParams={utmParams} />
       ) : null}
     </div>
   );

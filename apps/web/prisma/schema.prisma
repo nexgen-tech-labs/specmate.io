@@ -710,6 +710,13 @@ model AccessRequest {
   companySize OrgSize
   // Free-text marketing capture: how they heard about SpecMate / intended use case.
   howHeard    String?
+  // First-touch UTM attribution (Issue 10.1: "analytics correctly attribute
+  // signups to traffic source") — captured client-side from the landing
+  // page's URL at the moment the visitor first arrived, null if they came
+  // in without any utm_* params (e.g. direct traffic).
+  utmSource   String?
+  utmMedium   String?
+  utmCampaign String?
   status      AccessRequestStatus @default(PENDING)
   reviewedAt  DateTime?
   // Founder-only note (e.g. rejection reason) — never shown to the requester.

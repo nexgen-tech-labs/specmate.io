@@ -105,6 +105,41 @@ describe('AccessRequestsPage', () => {
 
     expect(screen.getByText(/\/signup-invite\/page-signup-tok-/)).toBeInTheDocument();
   });
+
+  it('shows UTM attribution next to how-heard when present', async () => {
+    currentSession = { user: { email: 'admin@specmate.io' } };
+    const email = `utm-${Date.now()}@acmecorp.com`;
+    createdEmails.push(email);
+    await prisma.accessRequest.create({
+      data: {
+        email,
+        companyName: 'Acme Corp',
+        companySize: 'SMALL',
+        utmSource: 'twitter',
+        utmMedium: 'social',
+        utmCampaign: 'launch-week',
+      },
+    });
+
+    const result = await AccessRequestsPage();
+    render(result);
+
+    expect(screen.getByText('via twitter / social / launch-week')).toBeInTheDocument();
+  });
+
+  it('shows no UTM line when utmSource is absent', async () => {
+    currentSession = { user: { email: 'admin@specmate.io' } };
+    const email = `no-utm-${Date.now()}@acmecorp.com`;
+    createdEmails.push(email);
+    await prisma.accessRequest.create({
+      data: { email, companyName: 'Acme Corp', companySize: 'SMALL' },
+    });
+
+    const result = await AccessRequestsPage();
+    render(result);
+
+    expect(screen.queryByText(/^via /)).not.toBeInTheDocument();
+  });
 });
 
 describe('AccessRequestsPage authorization', () => {

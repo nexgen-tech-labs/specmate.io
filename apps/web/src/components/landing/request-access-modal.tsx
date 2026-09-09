@@ -4,7 +4,23 @@ import { useState } from 'react';
 import { ORG_SIZE_OPTIONS } from '@/lib/org-size';
 import type { OrgSize } from '@prisma/client';
 
-export function RequestAccessModal({ onClose }: { onClose: () => void }) {
+// First-touch UTM attribution (Issue 10.1) — captured once by LandingPage at
+// mount and passed down here, rather than re-read from the URL at submit
+// time (which may have already been stripped by the ?request-access=1
+// deep-link handling).
+export interface UtmParams {
+  utmSource: string | null;
+  utmMedium: string | null;
+  utmCampaign: string | null;
+}
+
+export function RequestAccessModal({
+  onClose,
+  utmParams,
+}: {
+  onClose: () => void;
+  utmParams?: UtmParams;
+}) {
   const [email, setEmail] = useState('');
   const [companyName, setCompanyName] = useState('');
   const [companySize, setCompanySize] = useState<OrgSize>('SMALL');
@@ -20,7 +36,7 @@ export function RequestAccessModal({ onClose }: { onClose: () => void }) {
     const res = await fetch('/api/access-requests', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, companyName, companySize, howHeard }),
+      body: JSON.stringify({ email, companyName, companySize, howHeard, ...utmParams }),
     });
     setSubmitting(false);
     if (!res.ok) {

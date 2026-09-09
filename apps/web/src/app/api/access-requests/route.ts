@@ -10,11 +10,16 @@ interface AccessRequestBody {
   companyName: string;
   companySize: OrgSize;
   howHeard?: string;
+  utmSource?: string | null;
+  utmMedium?: string | null;
+  utmCampaign?: string | null;
 }
 
 function isValidBody(body: unknown): body is AccessRequestBody {
   if (typeof body !== 'object' || body === null) return false;
   const b = body as Record<string, unknown>;
+  const isOptionalUtmField = (v: unknown) =>
+    v === undefined || v === null || (typeof v === 'string' && v.length <= 200);
   return (
     typeof b.email === 'string' &&
     b.email.trim().length > 0 &&
@@ -23,7 +28,10 @@ function isValidBody(body: unknown): body is AccessRequestBody {
     b.companyName.trim().length <= 200 &&
     typeof b.companySize === 'string' &&
     VALID_ORG_SIZES.includes(b.companySize as OrgSize) &&
-    (b.howHeard === undefined || (typeof b.howHeard === 'string' && b.howHeard.length <= 2000))
+    (b.howHeard === undefined || (typeof b.howHeard === 'string' && b.howHeard.length <= 2000)) &&
+    isOptionalUtmField(b.utmSource) &&
+    isOptionalUtmField(b.utmMedium) &&
+    isOptionalUtmField(b.utmCampaign)
   );
 }
 
@@ -60,9 +68,15 @@ export async function POST(request: Request) {
       companyName: body.companyName.trim(),
       companySize: body.companySize,
       howHeard: body.howHeard?.trim() || null,
+      utmSource: body.utmSource || null,
+      utmMedium: body.utmMedium || null,
+      utmCampaign: body.utmCampaign || null,
     },
     // Resubmitting (including after a REJECTED outcome — circumstances
     // change) flips back to PENDING and refreshes the details on file.
+    // UTM attribution deliberately NOT overwritten here — first-touch
+    // attribution should reflect however they originally found SpecMate,
+    // not whatever link they happened to resubmit from.
     update: {
       companyName: body.companyName.trim(),
       companySize: body.companySize,
