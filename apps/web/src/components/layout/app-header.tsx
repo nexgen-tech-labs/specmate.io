@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { auth, signOut } from '@/lib/auth';
+import { HeaderAuthActions } from './header-auth-actions';
 
 export async function AppHeader() {
   const session = await auth();
@@ -38,20 +39,7 @@ export async function AppHeader() {
             </form>
           </div>
         ) : (
-          <div className="flex gap-3">
-            <Link
-              href="/login"
-              className="rounded-md border border-line bg-transparent px-4 py-2.5 font-mono text-sm text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-cobalt"
-            >
-              Sign In
-            </Link>
-            <Link
-              href="/onboarding"
-              className="rounded-md bg-cobalt px-5 py-2.5 font-mono text-sm font-semibold text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cobalt"
-            >
-              Get Started
-            </Link>
-          </div>
+          <HeaderAuthActions />
         )}
       </div>
     </header>

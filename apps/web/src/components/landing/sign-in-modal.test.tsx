@@ -78,3 +78,35 @@ describe('SignInModal — credentials sign-in redirect (Issue: sign-in landed ba
     expect(push).not.toHaveBeenCalled();
   });
 });
+
+describe('SignInModal — signup mode (invite-only beta)', () => {
+  beforeEach(() => {
+    push.mockClear();
+  });
+
+  it('routes to the homepage request-access flow on submit, not /onboarding', () => {
+    const onClose = vi.fn();
+    render(
+      <SignInModal
+        authMode="signup"
+        onModeChange={vi.fn()}
+        onClose={onClose}
+        onBackHome={vi.fn()}
+      />,
+    );
+    // Required fields must be filled for the button click to trigger native
+    // form submission in jsdom (HTML5 validation blocks it otherwise) — the
+    // values themselves are irrelevant since signup mode never reads them.
+    fireEvent.change(screen.getByPlaceholderText('Work email'), {
+      target: { value: 'demo@specmate.io' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Password'), {
+      target: { value: 'whatever123' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /create account/i }));
+
+    expect(onClose).toHaveBeenCalled();
+    expect(push).toHaveBeenCalledWith('/?request-access=1');
+    expect(push).not.toHaveBeenCalledWith('/onboarding');
+  });
+});

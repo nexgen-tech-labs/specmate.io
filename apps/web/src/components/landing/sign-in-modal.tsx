@@ -89,7 +89,10 @@ export function SignInModal({ authMode, onModeChange, onClose, onBackHome }: Sig
             e.preventDefault();
             if (authMode === 'signup') {
               onClose();
-              router.push('/onboarding');
+              // Self-serve signup is disabled during the invite-only beta —
+              // /onboarding would just dead-end on a notice; send them to the
+              // real request-access flow on the homepage instead.
+              router.push('/?request-access=1');
               return;
             }
             setError(null);
