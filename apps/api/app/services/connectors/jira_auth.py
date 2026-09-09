@@ -380,14 +380,10 @@ async def get_connect_connection_for_workspace(
     session: AsyncSession, workspace_id: str
 ) -> ConnectJwtConnection:
     """Resolves the ConnectJwtConnection for a workspace with a claimed
-    Atlassian Connect install (Issue 10.2). NOT yet wired into publish.py's
-    PublishGateway — that gateway is currently single-tenant (one
-    env-configured CloudTokenConnection for the whole deployment, resolved
-    with no workspace argument at all). Making publish per-workspace-aware is
-    a real call-site change to Epic 5's gateway plumbing, intentionally left
-    for when the per-workspace connection store (deferred since Issue 5.1) is
-    built — this function exists so that work has a ready-made connection
-    resolver to plug in, not to pre-empt that design decision."""
+    Atlassian Connect install (Issue 10.2). Wired into publish.py's
+    PublishGateway via _resolve_connection, which checks for a claimed
+    install before falling back to the OAuth Connection/env-configured
+    paths."""
     result = await session.execute(
         select(AtlassianConnectInstall).where(
             AtlassianConnectInstall.workspaceId == workspace_id,

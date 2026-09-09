@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.core.db import get_db_session
 from app.main import app
 from app.models import (
+    AtlassianConnectInstall,
     AuditEvent,
     Connection,
     DraftItem,
@@ -31,7 +32,11 @@ from app.models import (
     Workspace,
 )
 from app.routers.publish import PublishGateway, get_publish_gateway
-from app.services.connectors.jira_auth import CloudTokenConnection, JiraOAuthConnection
+from app.services.connectors.jira_auth import (
+    CloudTokenConnection,
+    ConnectJwtConnection,
+    JiraOAuthConnection,
+)
 from app.services.connectors.jira_publish import PublishCandidate, PublishOutcome
 from app.services.crypto import encrypt_credentials
 from tests.audit_cleanup import purge_audit_events
@@ -947,4 +952,98 @@ def test_publish_falls_back_to_org_level_connection_when_no_workspace_connection
     assert connection.cloud_id == "org-cloud-id-xyz"
 
     asyncio.run(_cleanup_org_level_connection(ids["workspace_id"], organization_id))
+    asyncio.run(_cleanup(ids))
+
+
+async def _add_claimed_connect_install(workspace_id: str) -> None:
+    """Atlassian Marketplace install (Issue 10.2), claimed by this workspace —
+    a fully separate table from Connection by design, so this must be found
+    without any Connection row existing at all."""
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            now = _now()
+            session.add(
+                AtlassianConnectInstall(
+                    clientKey="connect-test-client-key",
+                    sharedSecret="connect-test-shared-secret",
+                    baseUrl="https://connect-test.atlassian.net",
+                    workspaceId=workspace_id,
+                    claimedAt=now,
+                    installedAt=now,
+                    createdAt=now,
+                    updatedAt=now,
+                )
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def _cleanup_connect_install(workspace_id: str) -> None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            await session.execute(
+                delete(AtlassianConnectInstall).where(
+                    AtlassianConnectInstall.workspaceId == workspace_id
+                )
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+def test_publish_prefers_claimed_connect_install_over_env_fallback() -> None:
+    """Issue 10.2 (Atlassian Marketplace listing): a workspace that installed
+    SpecMate from the Marketplace and claimed the install has no Connection
+    row at all — _resolve_connection must check AtlassianConnectInstall
+    before falling through to the (in this test, unconfigured) env fallback,
+    or every Marketplace-originated workspace would fail to publish."""
+    ids = asyncio.run(_fixture())
+    asyncio.run(_add_claimed_connect_install(ids["workspace_id"]))
+
+    fake = _FakeJira()
+    seen_connections: list[object] = []
+    original_gateway = fake.gateway
+
+    def gateway_with_connection_capture() -> PublishGateway:
+        gw = original_gateway()
+
+        async def capturing_create(conn: object, *args: object, **kwargs: object) -> PublishOutcome:
+            seen_connections.append(conn)
+            return await gw.create(conn, *args, **kwargs)  # type: ignore[misc]
+
+        from app.routers.publish import _resolve_connection
+
+        return PublishGateway(
+            connection=_resolve_connection,
+            projects=gw.projects,
+            meta=gw.meta,
+            create=capturing_create,
+            update=gw.update,
+            health=gw.health,
+        )
+
+    app.dependency_overrides[get_publish_gateway] = gateway_with_connection_capture
+    client = TestClient(app)
+    try:
+        _setup_mapping(client, ids["project_id"])
+        _dispose()
+        response = client.post(
+            f"/projects/{ids['project_id']}/publish/jira", json={"item_ids": [ids["epic_id"]]}
+        )
+    finally:
+        app.dependency_overrides.pop(get_publish_gateway, None)
+        _dispose()
+
+    assert response.status_code == 200
+    assert response.json()["succeeded"] == 1
+    assert len(seen_connections) == 1
+    connection = seen_connections[0]
+    assert isinstance(connection, ConnectJwtConnection)
+    assert connection.client_key == "connect-test-client-key"
+    assert connection.url == "https://connect-test.atlassian.net"
+
+    asyncio.run(_cleanup_connect_install(ids["workspace_id"]))
     asyncio.run(_cleanup(ids))

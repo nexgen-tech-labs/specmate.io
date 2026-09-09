@@ -38,14 +38,16 @@ export async function GET() {
     apiVersion: 1,
     modules: {
       // A generic link module is enough to prove the install/uninstall
-      // lifecycle end-to-end; a real project-admin UI panel (linking this
-      // install to a SpecMate workspace inline, rather than via the settings
-      // page claim flow) is a natural follow-up once this is live-verified.
+      // lifecycle end-to-end; it sends the Jira admin to SpecMate's own
+      // sign-in/workspace-settings claim flow (workspaces/[id]/atlassian-connect)
+      // rather than an embedded-in-Jira iframe panel — a real iframe admin
+      // panel (Connect JWT context, claiming inline) is a natural follow-up
+      // once this is live-verified.
       generalPages: [
         {
           key: 'specmate-workspace-link',
           name: { value: 'SpecMate' },
-          url: '/atlassian-connect/link',
+          url: `${baseUrl}/login`,
           location: 'system.top.navigation.bar',
         },
       ],

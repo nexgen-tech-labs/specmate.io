@@ -44,6 +44,14 @@ export default async function WorkspaceSettingsPage({
         </Link>
       ) : null}
       <h1 className="mt-2 text-3xl font-bold tracking-tight text-ink">{workspace.name}</h1>
+      <div className="mt-6">
+        <Link
+          href={`/workspaces/${workspaceId}/atlassian-connect`}
+          className="text-sm font-semibold text-cobalt"
+        >
+          Atlassian Marketplace →
+        </Link>
+      </div>
       <div className="mt-8">
         <TeamList
           workspaceId={workspaceId}

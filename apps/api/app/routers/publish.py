@@ -31,6 +31,7 @@ from app.services.billing.metering import report_workspace_current_usage
 from app.services.connectors.jira_auth import (
     JiraConnection,
     check_connection_health,
+    get_connect_connection_for_workspace,
     resolve_jira_connection,
 )
 from app.services.connectors.jira_publish import (
@@ -68,17 +69,32 @@ _DEFAULT_TYPE_SUGGESTIONS: dict[str, list[str]] = {
 
 
 async def _resolve_connection(session: AsyncSession, workspace_id: str) -> JiraConnection:
-    """Prefers a workspace-scoped Connection (the older per-workspace OAuth
-    flow), then the workspace's organization-level Connection (the Onboarding
-    Flow redesign's "authorize once, every workspace picks its own board" —
-    resolve_jira_connection has no way to check both in one call since it
-    requires exactly one of workspace_id/organization_id), then finally the
-    single-tenant env-configured fallback. Without this, publishing from a
-    workspace that only ever went through the org-level Connect flow — no
-    workspace-scoped Connection row exists — fell straight through to env
-    config and failed with a confusing "Jira connection is not configured"
-    even though the org's Jira really is connected."""
-    from app.models import Connection
+    """Prefers a claimed Atlassian Connect install (Issue 10.2's Marketplace
+    app — a workspace that installed SpecMate from the Atlassian Marketplace
+    and claimed it has no Connection row at all, since Connect installs are
+    a separate table by design), then a workspace-scoped Connection (the
+    older per-workspace OAuth flow), then the workspace's organization-level
+    Connection (the Onboarding Flow redesign's "authorize once, every
+    workspace picks its own board" — resolve_jira_connection has no way to
+    check both in one call since it requires exactly one of
+    workspace_id/organization_id), then finally the single-tenant
+    env-configured fallback. Without this, publishing from a workspace that
+    only ever went through the org-level Connect flow — no workspace-scoped
+    Connection row exists — fell straight through to env config and failed
+    with a confusing "Jira connection is not configured" even though the
+    org's Jira really is connected."""
+    from app.models import AtlassianConnectInstall, Connection
+
+    has_connect_install = (
+        await session.execute(
+            select(AtlassianConnectInstall.id).where(
+                AtlassianConnectInstall.workspaceId == workspace_id,
+                AtlassianConnectInstall.uninstalledAt.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if has_connect_install is not None:
+        return await get_connect_connection_for_workspace(session, workspace_id)
 
     has_workspace_connection = (
         await session.execute(
