@@ -31,7 +31,6 @@ from app.services.billing.metering import report_workspace_current_usage
 from app.services.connectors.ado_auth import (
     AdoConnection,
     check_connection_health,
-    get_ado_connection,
     resolve_ado_connection,
 )
 from app.services.connectors.ado_publish import (
@@ -67,20 +66,16 @@ _DEFAULT_TYPE_SUGGESTIONS: dict[str, list[str]] = {
 }
 
 
-async def _resolve_connection_env_only(_session: AsyncSession, _workspace_id: str) -> AdoConnection:
-    """Default gateway connection resolver — env-configured/app-only only, no
-    per-workspace Connection lookup. Endpoints not scoped to a specific
-    workspace (health/projects/mapping, called before a project is known)
-    use this; the publish endpoint (which does have a workspace in scope)
-    uses _resolve_connection below instead."""
-    return get_ado_connection()
-
-
 async def _resolve_connection(session: AsyncSession, workspace_id: str) -> AdoConnection:
     """Prefers a workspace-scoped OAuth Connection (Issue 10.4's "Connect your
     ADO account" wizard step), then the workspace's organization-level
     Connection (mirrors publish.py's Jira _resolve_connection exactly), then
-    finally the single-tenant env-configured/app-only fallback."""
+    finally the single-tenant env-configured/app-only fallback. Also the
+    gateway's default resolver for endpoints with no workspace in their route
+    path (health/projects/mapping, called before a project is known) — they
+    pass "" as workspace_id, which matches no Connection row and falls
+    straight through to the env-configured/app-only connection, same
+    behavior as before this resolver became workspace-aware."""
     from app.models import Connection
 
     has_workspace_connection = (
@@ -93,7 +88,7 @@ async def _resolve_connection(session: AsyncSession, workspace_id: str) -> AdoCo
     if has_workspace_connection is not None:
         return await resolve_ado_connection(session, workspace_id)
 
-    workspace = await session.get(Workspace, workspace_id)
+    workspace = await session.get(Workspace, workspace_id) if workspace_id else None
     if workspace and workspace.organizationId:
         has_org_connection = (
             await session.execute(
@@ -136,11 +131,13 @@ async def ado_health(
     gateway: Annotated[AdoPublishGateway, Depends(get_ado_gateway)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> dict[str, object]:
-    # Not workspace-scoped in its route path (unlike /publish/ado) — checks
-    # the env-configured/app-only connection only, same as before this
+    # Not workspace-scoped in its route path (unlike /publish/ado) — passes ""
+    # as the workspace id, which resolve_ado_connection/resolve_jira_connection's
+    # shape treats as "no workspace-scoped Connection can match" and falls
+    # through to the env-configured/app-only connection, same as before this
     # gateway's connection resolver became workspace-aware.
     try:
-        connection = await _resolve_connection_env_only(session, "")
+        connection = await gateway.connection(session, "")
     except ConnectorError as exc:
         return {"ok": False, "reason": str(exc)}
     return await gateway.health(connection)
@@ -152,7 +149,7 @@ async def ado_projects(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[dict[str, str]]:
     try:
-        return await gateway.projects(await _resolve_connection_env_only(session, ""))
+        return await gateway.projects(await gateway.connection(session, ""))
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -176,9 +173,7 @@ async def upsert_ado_mapping(
     if await session.get(Project, project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found.")
     try:
-        metadata = await gateway.meta(
-            await _resolve_connection_env_only(session, ""), body.remote_project
-        )
+        metadata = await gateway.meta(await gateway.connection(session, ""), body.remote_project)
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
