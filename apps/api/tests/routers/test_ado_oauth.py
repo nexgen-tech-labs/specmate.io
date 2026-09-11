@@ -1,0 +1,449 @@
+"""Router-level ADO OAuth tests (Issue 10.4) — real Postgres, mocked token
+exchange, mirroring test_jira_oauth.py's sync-test + asyncio.run pattern
+exactly. ADO-specific: no per-tenant "accessible resources" discovery step —
+the org is already fixed by ADO_ORG_URL, so Connection.scope just carries
+that back for resolve_ado_connection to read."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, patch
+
+import httpx
+from fastapi.testclient import TestClient
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+from app.core import db as db_module
+from app.core.config import settings
+from app.main import app
+from app.models import Connection, Organization, OrgWizardSession, Project, WizardSession, Workspace
+from app.services.connectors.ado_auth import AdoOAuthTokens
+
+_TEST_DEK_B64 = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
+
+
+def _now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _dispose_app_engine() -> None:
+    asyncio.run(db_module.engine.dispose())
+
+
+async def _create_wizard_session_async(expires_in_future: bool) -> dict[str, str]:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            workspace = Workspace(name="ADO OAuth Test WS", createdAt=_now(), updatedAt=_now())
+            session.add(workspace)
+            await session.flush()
+            project = Project(
+                workspaceId=workspace.id, name="ADO OAuth Test Project", createdAt=_now(), updatedAt=_now()
+            )
+            session.add(project)
+            await session.flush()
+            delta = timedelta(hours=1) if expires_in_future else -timedelta(hours=1)
+            wizard_session = WizardSession(
+                workspaceId=workspace.id,
+                projectId=project.id,
+                toolKey="ado",
+                currentStep="authenticate",
+                collectedState={},
+                createdAt=_now(),
+                expiresAt=_now() + delta,
+            )
+            session.add(wizard_session)
+            await session.flush()
+            ids = {
+                "workspace_id": workspace.id,
+                "project_id": project.id,
+                "wizard_session_id": wizard_session.id,
+            }
+            await session.commit()
+            return ids
+    finally:
+        await engine.dispose()
+
+
+def _create_wizard_session(expires_in_future: bool = True) -> dict[str, str]:
+    return asyncio.run(_create_wizard_session_async(expires_in_future))
+
+
+async def _cleanup_async(ids: dict[str, str]) -> None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            await session.execute(delete(Connection).where(Connection.workspaceId == ids["workspace_id"]))
+            await session.execute(
+                delete(WizardSession).where(WizardSession.workspaceId == ids["workspace_id"])
+            )
+            await session.execute(delete(Project).where(Project.id == ids["project_id"]))
+            await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+def _cleanup(ids: dict[str, str]) -> None:
+    asyncio.run(_cleanup_async(ids))
+
+
+async def _get_connection_async(workspace_id: str) -> Connection | None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            return (
+                await session.execute(
+                    select(Connection).where(
+                        Connection.workspaceId == workspace_id, Connection.toolKey == "ado"
+                    )
+                )
+            ).scalar_one_or_none()
+    finally:
+        await engine.dispose()
+
+
+def _get_connection(workspace_id: str) -> Connection | None:
+    return asyncio.run(_get_connection_async(workspace_id))
+
+
+async def _count_connections_async(workspace_id: str) -> int:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(Connection).where(
+                            Connection.workspaceId == workspace_id, Connection.toolKey == "ado"
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return len(rows)
+    finally:
+        await engine.dispose()
+
+
+def _count_connections(workspace_id: str) -> int:
+    return asyncio.run(_count_connections_async(workspace_id))
+
+
+async def _get_wizard_session_async(wizard_session_id: str) -> WizardSession | None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            return await session.get(WizardSession, wizard_session_id)
+    finally:
+        await engine.dispose()
+
+
+def _get_wizard_session(wizard_session_id: str) -> WizardSession | None:
+    return asyncio.run(_get_wizard_session_async(wizard_session_id))
+
+
+_FAKE_TOKENS = AdoOAuthTokens(
+    access_token="ado_realSecretAccessToken",
+    refresh_token="ado_realSecretRefreshToken",
+    expires_in=3600,
+)
+
+
+def test_start_oauth_redirects_to_entra_with_expected_params() -> None:
+    with (
+        patch.object(settings, "azure_ad_client_id", "test-client-id"),
+        patch.object(settings, "azure_ad_tenant_id", "test-tenant-id"),
+    ):
+        client = TestClient(app, follow_redirects=False)
+        res = client.get("/connectors/ado/oauth/start", params={"wizard_session_id": "abc123"})
+        assert res.status_code in (302, 307)
+        location = res.headers["location"]
+        assert location.startswith(
+            "https://login.microsoftonline.com/test-tenant-id/oauth2/v2.0/authorize?"
+        )
+        assert "client_id=test-client-id" in location
+        assert "state=abc123" in location
+
+
+def test_start_oauth_returns_503_when_not_configured() -> None:
+    with (
+        patch.object(settings, "azure_ad_client_id", ""),
+        patch.object(settings, "azure_ad_tenant_id", ""),
+    ):
+        client = TestClient(app, follow_redirects=False)
+        res = client.get("/connectors/ado/oauth/start", params={"wizard_session_id": "abc123"})
+        assert res.status_code == 503
+
+
+def test_start_oauth_rejects_both_session_id_kinds() -> None:
+    with (
+        patch.object(settings, "azure_ad_client_id", "test-client-id"),
+        patch.object(settings, "azure_ad_tenant_id", "test-tenant-id"),
+    ):
+        client = TestClient(app, follow_redirects=False)
+        res = client.get(
+            "/connectors/ado/oauth/start",
+            params={"wizard_session_id": "a", "org_wizard_session_id": "b"},
+        )
+        assert res.status_code == 400
+
+
+def test_callback_with_valid_session_creates_encrypted_connection_and_advances_step() -> None:
+    ids = _create_wizard_session()
+    try:
+        _dispose_app_engine()
+        client = TestClient(app, follow_redirects=False)
+        with (
+            patch.object(settings, "azure_ad_client_id", "test-client-id"),
+            patch.object(settings, "azure_ad_client_secret", "test-secret"),
+            patch.object(settings, "azure_ad_tenant_id", "test-tenant-id"),
+            patch.object(settings, "ado_org_url", "https://dev.azure.com/example"),
+            patch.object(settings, "connector_dek_b64", _TEST_DEK_B64),
+            patch(
+                "app.routers.ado_oauth.exchange_ado_oauth_code_for_tokens",
+                new=AsyncMock(return_value=_FAKE_TOKENS),
+            ),
+        ):
+            res = client.get(
+                "/connectors/ado/oauth/callback",
+                params={"code": "fake-code", "state": ids["wizard_session_id"]},
+            )
+        assert res.status_code in (302, 307)
+        location = res.headers["location"]
+        assert location.startswith(settings.web_base_url)
+        assert f"/workspaces/{ids['workspace_id']}/projects/{ids['project_id']}/connect/ado" in location
+        assert "oauth=success" in location
+
+        _dispose_app_engine()
+        conn = _get_connection(ids["workspace_id"])
+        assert conn is not None
+        assert conn.authMethod == "OAUTH"
+        assert conn.scope == {"org_url": "https://dev.azure.com/example"}
+        assert conn.encryptedCredentials is not None
+        assert b"ado_realSecretAccessToken" not in conn.encryptedCredentials
+        assert b"ado_realSecretRefreshToken" not in conn.encryptedCredentials
+
+        ws = _get_wizard_session(ids["wizard_session_id"])
+        assert ws is not None
+        assert ws.currentStep == "select_scope"
+    finally:
+        _cleanup(ids)
+
+
+def test_callback_with_unknown_state_returns_404() -> None:
+    client = TestClient(app)
+    with (
+        patch.object(settings, "azure_ad_client_id", "test-client-id"),
+        patch.object(settings, "azure_ad_client_secret", "test-secret"),
+        patch.object(settings, "azure_ad_tenant_id", "test-tenant-id"),
+    ):
+        res = client.get(
+            "/connectors/ado/oauth/callback",
+            params={"code": "fake-code", "state": "nonexistent-session-id"},
+        )
+    assert res.status_code == 404
+
+
+def test_callback_with_expired_session_returns_404() -> None:
+    ids = _create_wizard_session(expires_in_future=False)
+    try:
+        _dispose_app_engine()
+        client = TestClient(app)
+        with (
+            patch.object(settings, "azure_ad_client_id", "test-client-id"),
+            patch.object(settings, "azure_ad_client_secret", "test-secret"),
+            patch.object(settings, "azure_ad_tenant_id", "test-tenant-id"),
+        ):
+            res = client.get(
+                "/connectors/ado/oauth/callback",
+                params={"code": "fake-code", "state": ids["wizard_session_id"]},
+            )
+        assert res.status_code == 404
+
+        _dispose_app_engine()
+        assert _get_connection(ids["workspace_id"]) is None
+    finally:
+        _cleanup(ids)
+
+
+def test_callback_called_twice_updates_existing_connection_not_duplicate() -> None:
+    ids = _create_wizard_session()
+    try:
+        with (
+            patch.object(settings, "azure_ad_client_id", "test-client-id"),
+            patch.object(settings, "azure_ad_client_secret", "test-secret"),
+            patch.object(settings, "azure_ad_tenant_id", "test-tenant-id"),
+            patch.object(settings, "ado_org_url", "https://dev.azure.com/example"),
+            patch.object(settings, "connector_dek_b64", _TEST_DEK_B64),
+            patch(
+                "app.routers.ado_oauth.exchange_ado_oauth_code_for_tokens",
+                new=AsyncMock(return_value=_FAKE_TOKENS),
+            ),
+        ):
+            _dispose_app_engine()
+            res1 = TestClient(app, follow_redirects=False).get(
+                "/connectors/ado/oauth/callback",
+                params={"code": "fake-code-1", "state": ids["wizard_session_id"]},
+            )
+            assert res1.status_code in (302, 307)
+
+            _dispose_app_engine()
+            res2 = TestClient(app, follow_redirects=False).get(
+                "/connectors/ado/oauth/callback",
+                params={"code": "fake-code-2", "state": ids["wizard_session_id"]},
+            )
+            assert res2.status_code in (302, 307)
+
+        _dispose_app_engine()
+        assert _count_connections(ids["workspace_id"]) == 1
+    finally:
+        _cleanup(ids)
+
+
+async def _create_org_wizard_session_async(expires_in_future: bool) -> dict[str, str]:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            org = Organization(name="ADO Org OAuth Test Org", createdAt=_now(), updatedAt=_now())
+            session.add(org)
+            await session.flush()
+            delta = timedelta(hours=1) if expires_in_future else -timedelta(hours=1)
+            org_wizard_session = OrgWizardSession(
+                organizationId=org.id,
+                toolKey="ado",
+                currentStep="authenticate",
+                collectedState={},
+                createdAt=_now(),
+                expiresAt=_now() + delta,
+            )
+            session.add(org_wizard_session)
+            await session.flush()
+            ids = {"organization_id": org.id, "org_wizard_session_id": org_wizard_session.id}
+            await session.commit()
+            return ids
+    finally:
+        await engine.dispose()
+
+
+def _create_org_wizard_session(expires_in_future: bool = True) -> dict[str, str]:
+    return asyncio.run(_create_org_wizard_session_async(expires_in_future))
+
+
+async def _cleanup_org_async(ids: dict[str, str]) -> None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            await session.execute(
+                delete(Connection).where(Connection.organizationId == ids["organization_id"])
+            )
+            await session.execute(
+                delete(OrgWizardSession).where(
+                    OrgWizardSession.organizationId == ids["organization_id"]
+                )
+            )
+            await session.execute(delete(Organization).where(Organization.id == ids["organization_id"]))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+def _cleanup_org(ids: dict[str, str]) -> None:
+    asyncio.run(_cleanup_org_async(ids))
+
+
+async def _get_org_connection_async(organization_id: str) -> Connection | None:
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            return (
+                await session.execute(
+                    select(Connection).where(
+                        Connection.organizationId == organization_id, Connection.toolKey == "ado"
+                    )
+                )
+            ).scalar_one_or_none()
+    finally:
+        await engine.dispose()
+
+
+def _get_org_connection(organization_id: str) -> Connection | None:
+    return asyncio.run(_get_org_connection_async(organization_id))
+
+
+def test_org_callback_with_valid_session_creates_org_scoped_connection() -> None:
+    ids = _create_org_wizard_session()
+    try:
+        _dispose_app_engine()
+        client = TestClient(app, follow_redirects=False)
+        with (
+            patch.object(settings, "azure_ad_client_id", "test-client-id"),
+            patch.object(settings, "azure_ad_client_secret", "test-secret"),
+            patch.object(settings, "azure_ad_tenant_id", "test-tenant-id"),
+            patch.object(settings, "ado_org_url", "https://dev.azure.com/example"),
+            patch.object(settings, "connector_dek_b64", _TEST_DEK_B64),
+            patch(
+                "app.routers.ado_oauth.exchange_ado_oauth_code_for_tokens",
+                new=AsyncMock(return_value=_FAKE_TOKENS),
+            ),
+        ):
+            res = client.get(
+                "/connectors/ado/oauth/callback",
+                params={"code": "fake-code", "state": ids["org_wizard_session_id"]},
+            )
+        assert res.status_code in (302, 307)
+        location = res.headers["location"]
+        assert location.startswith(settings.web_base_url)
+        assert f"/organizations/{ids['organization_id']}/connect/ado" in location
+        assert "oauth=success" in location
+
+        _dispose_app_engine()
+        conn = _get_org_connection(ids["organization_id"])
+        assert conn is not None
+        assert conn.workspaceId is None
+        assert conn.authMethod == "OAUTH"
+    finally:
+        _cleanup_org(ids)
+
+
+def test_callback_called_concurrently_results_in_exactly_one_connection() -> None:
+    ids = _create_wizard_session()
+    try:
+        with (
+            patch.object(settings, "azure_ad_client_id", "test-client-id"),
+            patch.object(settings, "azure_ad_client_secret", "test-secret"),
+            patch.object(settings, "azure_ad_tenant_id", "test-tenant-id"),
+            patch.object(settings, "ado_org_url", "https://dev.azure.com/example"),
+            patch.object(settings, "connector_dek_b64", _TEST_DEK_B64),
+            patch(
+                "app.routers.ado_oauth.exchange_ado_oauth_code_for_tokens",
+                new=AsyncMock(return_value=_FAKE_TOKENS),
+            ),
+        ):
+
+            async def _fire_both() -> tuple[int, int]:
+                async def _call(code: str) -> int:
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app), base_url="http://test"
+                    ) as ac:
+                        res = await ac.get(
+                            "/connectors/ado/oauth/callback",
+                            params={"code": code, "state": ids["wizard_session_id"]},
+                        )
+                        return res.status_code
+
+                return await asyncio.gather(_call("fake-code-1"), _call("fake-code-2"))
+
+            _dispose_app_engine()
+            status_codes = asyncio.run(_fire_both())
+
+        assert status_codes[0] in (302, 307)
+        assert status_codes[1] in (302, 307)
+
+        _dispose_app_engine()
+        assert _count_connections(ids["workspace_id"]) == 1
+    finally:
+        _cleanup(ids)

@@ -4,6 +4,7 @@ from starlette.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.rate_limit import install_rate_limit_middleware
 from app.routers import (
+    ado_oauth,
     ai_demo,
     billing,
     connection_requests,
@@ -45,6 +46,7 @@ app.include_router(sources.router)
 app.include_router(connectors.router)
 app.include_router(github_oauth.router)
 app.include_router(jira_oauth.router)
+app.include_router(ado_oauth.router)
 app.include_router(wizard_sessions.router)
 app.include_router(org_connectors.router)
 app.include_router(connection_requests.router)

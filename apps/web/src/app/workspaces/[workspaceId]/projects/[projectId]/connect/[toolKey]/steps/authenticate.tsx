@@ -48,7 +48,8 @@ export function AuthenticateStep({
     }
   }
 
-  // ENV_CONFIGURED tools (Jira/ADO today): probe health automatically and
+  // Tools with only ENV_CONFIGURED available (no OAUTH in auth_methods):
+  // probe health automatically and
   // auto-advance on success. checkHealth immediately calls setChecking(true),
   // which the set-state-in-effect rule flags — this is the documented
   // exception (https://react.dev/learn/you-might-not-need-an-effect):

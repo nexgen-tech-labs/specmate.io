@@ -91,8 +91,11 @@ class _FakeAdo:
         async def fake_health(_conn: object) -> dict[str, object]:
             return {"ok": True}
 
+        async def fake_connection(_session: object, _workspace_id: str) -> PatConnection:
+            return PatConnection("t", "https://x")
+
         return AdoPublishGateway(
-            connection=lambda: PatConnection("t", "https://x"),
+            connection=fake_connection,
             projects=fake_projects,
             meta=fake_meta,
             create=fake_create,

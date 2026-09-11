@@ -28,7 +28,12 @@ from app.models import (
 )
 from app.services.audit import make_rate_limit_recorder, record_audit_event
 from app.services.billing.metering import report_workspace_current_usage
-from app.services.connectors.ado_auth import AdoConnection, check_connection_health, get_ado_connection
+from app.services.connectors.ado_auth import (
+    AdoConnection,
+    check_connection_health,
+    get_ado_connection,
+    resolve_ado_connection,
+)
 from app.services.connectors.ado_publish import (
     AdoPublishOutcome,
     build_candidate,
@@ -62,9 +67,51 @@ _DEFAULT_TYPE_SUGGESTIONS: dict[str, list[str]] = {
 }
 
 
+async def _resolve_connection_env_only(_session: AsyncSession, _workspace_id: str) -> AdoConnection:
+    """Default gateway connection resolver — env-configured/app-only only, no
+    per-workspace Connection lookup. Endpoints not scoped to a specific
+    workspace (health/projects/mapping, called before a project is known)
+    use this; the publish endpoint (which does have a workspace in scope)
+    uses _resolve_connection below instead."""
+    return get_ado_connection()
+
+
+async def _resolve_connection(session: AsyncSession, workspace_id: str) -> AdoConnection:
+    """Prefers a workspace-scoped OAuth Connection (Issue 10.4's "Connect your
+    ADO account" wizard step), then the workspace's organization-level
+    Connection (mirrors publish.py's Jira _resolve_connection exactly), then
+    finally the single-tenant env-configured/app-only fallback."""
+    from app.models import Connection
+
+    has_workspace_connection = (
+        await session.execute(
+            select(Connection.id).where(
+                Connection.workspaceId == workspace_id, Connection.toolKey == "ado"
+            )
+        )
+    ).scalar_one_or_none()
+    if has_workspace_connection is not None:
+        return await resolve_ado_connection(session, workspace_id)
+
+    workspace = await session.get(Workspace, workspace_id)
+    if workspace and workspace.organizationId:
+        has_org_connection = (
+            await session.execute(
+                select(Connection.id).where(
+                    Connection.organizationId == workspace.organizationId,
+                    Connection.toolKey == "ado",
+                )
+            )
+        ).scalar_one_or_none()
+        if has_org_connection is not None:
+            return await resolve_ado_connection(session, organization_id=workspace.organizationId)
+
+    return await resolve_ado_connection(session, workspace_id)
+
+
 @dataclass
 class AdoPublishGateway:
-    connection: Callable[[], AdoConnection] = get_ado_connection
+    connection: Callable[[AsyncSession, str], Awaitable[AdoConnection]] = _resolve_connection
     projects: Callable[[AdoConnection], Awaitable[list[dict[str, str]]]] = discover_projects
     meta: Callable[[AdoConnection, str], Awaitable[dict[str, object]]] = discover_project_meta
     create: Callable[..., Awaitable[AdoPublishOutcome]] = create_work_item
@@ -85,9 +132,15 @@ def _now() -> datetime:
 
 
 @router.get("/connectors/ado/health")
-async def ado_health(gateway: Annotated[AdoPublishGateway, Depends(get_ado_gateway)]) -> dict[str, object]:
+async def ado_health(
+    gateway: Annotated[AdoPublishGateway, Depends(get_ado_gateway)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict[str, object]:
+    # Not workspace-scoped in its route path (unlike /publish/ado) — checks
+    # the env-configured/app-only connection only, same as before this
+    # gateway's connection resolver became workspace-aware.
     try:
-        connection = gateway.connection()
+        connection = await _resolve_connection_env_only(session, "")
     except ConnectorError as exc:
         return {"ok": False, "reason": str(exc)}
     return await gateway.health(connection)
@@ -96,9 +149,10 @@ async def ado_health(gateway: Annotated[AdoPublishGateway, Depends(get_ado_gatew
 @router.get("/connectors/ado/projects")
 async def ado_projects(
     gateway: Annotated[AdoPublishGateway, Depends(get_ado_gateway)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[dict[str, str]]:
     try:
-        return await gateway.projects(gateway.connection())
+        return await gateway.projects(await _resolve_connection_env_only(session, ""))
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -122,7 +176,9 @@ async def upsert_ado_mapping(
     if await session.get(Project, project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found.")
     try:
-        metadata = await gateway.meta(gateway.connection(), body.remote_project)
+        metadata = await gateway.meta(
+            await _resolve_connection_env_only(session, ""), body.remote_project
+        )
     except ConnectorError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -279,11 +335,11 @@ async def publish_to_ado(
         row.draftItemId: (row.externalKey, row.externalUrl) for row in published_result.scalars()
     }
 
-    def work_item_api_url(key: str) -> str:
+    def work_item_api_url(key: str, connection: AdoConnection) -> str:
         # key is "AB#123"; ADO's relation payload needs the _apis resource URL, not
         # the human browse URL stored on PublishedItem.externalUrl.
         numeric_id = key.split("#", 1)[1]
-        return f"{gateway.connection().org_url()}/_apis/wit/workItems/{numeric_id}"
+        return f"{connection.org_url()}/_apis/wit/workItems/{numeric_id}"
 
     results: list[AdoPublishItemResult] = []
     candidates = []
@@ -334,7 +390,7 @@ async def publish_to_ado(
     connection = None
     if candidates:
         try:
-            connection = gateway.connection()
+            connection = await gateway.connection(session, workspace.id)
         except ConnectorError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -354,7 +410,8 @@ async def publish_to_ado(
                     )
                 )
                 continue
-            parent_url = work_item_api_url(parent_entry[0])
+            assert connection is not None
+            parent_url = work_item_api_url(parent_entry[0], connection)
 
         assert connection is not None
         existing = update_targets.get(candidate.item_id)

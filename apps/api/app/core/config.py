@@ -19,7 +19,15 @@ class Settings(BaseSettings):
     ado_org_url: str = ""  # e.g. https://dev.azure.com/yourorg
     ado_pat: str = ""
     # Azure AD app registration for ADO OAuth (Issue 6.1) — optional; when all three
-    # are set, ado_auth.get_ado_connection() prefers OAuth over the PAT above.
+    # are set, ado_auth.get_ado_connection() prefers app-only OAuth over the PAT
+    # above. The SAME app registration also powers per-workspace delegated OAuth
+    # (Issue 10.4's "Connect your ADO account" wizard step, ado_auth.py's
+    # exchange_ado_oauth_code_for_tokens/resolve_ado_connection) — a different
+    # grant type and scopes (vso.* delegated scopes, not .default), but no
+    # second app registration is needed. Must have a delegated redirect URI
+    # registered pointing at {api_base_url_external}/connectors/ado/oauth/callback
+    # for the delegated flow to work; the app-only client-credentials flow
+    # doesn't use a redirect URI at all.
     azure_ad_client_id: str = ""
     azure_ad_client_secret: str = ""
     azure_ad_tenant_id: str = ""

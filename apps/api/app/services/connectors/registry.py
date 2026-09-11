@@ -42,7 +42,7 @@ CONNECTOR_REGISTRY: dict[str, ConnectorDefinition] = {
     "ado": ConnectorDefinition(
         tool_key="ado",
         display_name="Azure DevOps",
-        auth_methods=["ENV_CONFIGURED"],
+        auth_methods=["ENV_CONFIGURED", "OAUTH"],
         scope_picker_type="PROJECT_NAME",
         discovery_fn=ado_publish.discover_as_result,
         capabilities=ConnectorCapabilities(
