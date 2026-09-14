@@ -231,15 +231,17 @@ def test_scope_options_returns_404_for_unknown_connector() -> None:
         _cleanup(organization_id)
 
 
-def test_scope_options_returns_404_for_ado_no_org_level_support() -> None:
-    # ADO has no org-level Connection support yet, matching its workspace-level
-    # PAT-only auth gap — confirm this is a clean 404, not a 500.
+def test_scope_options_returns_422_when_no_org_connection_exists_for_ado() -> None:
+    # ADO joined Jira/GitHub's org-level Connect flow once resolve_ado_connection
+    # gained organization_id support (Issue 10.4's delegated OAuth) — confirm it
+    # goes through the same resolution path (422 for "not connected yet"), not
+    # the old 404 "no org-level support at all".
     organization_id = _create_organization()
     try:
         _dispose_app_engine()
         client = TestClient(app)
         res = client.get(f"/organizations/{organization_id}/connectors/ado/scope-options")
-        assert res.status_code == 404
+        assert res.status_code == 422
     finally:
         _cleanup(organization_id)
 
@@ -288,5 +290,42 @@ def test_scope_options_returns_discovered_projects_when_org_connection_resolves(
         body = res.json()
         assert body["connection_id"] == connection_id
         assert body["scope_options"] == [{"id": "PAY", "label": "Payments (PAY)"}]
+    finally:
+        _cleanup(organization_id)
+
+
+def test_scope_options_returns_discovered_ado_projects_when_org_connection_resolves() -> None:
+    organization_id = _create_organization()
+    try:
+        connection_id = _create_connection(organization_id, "ado")
+
+        from app.services.connectors.discovery_types import DiscoveryResult, ScopeOption
+
+        fake_result = DiscoveryResult(
+            scope_options=[ScopeOption(id="hitesh-specmate", label="hitesh-specmate")],
+            item_types=None,
+            extras={},
+        )
+        import dataclasses
+
+        from app.services.connectors.registry import CONNECTOR_REGISTRY
+
+        fake_definition = dataclasses.replace(
+            CONNECTOR_REGISTRY["ado"], discovery_fn=AsyncMock(return_value=fake_result)
+        )
+        with (
+            patch(
+                "app.routers.org_connectors._resolve_org_connection",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch.dict(CONNECTOR_REGISTRY, {"ado": fake_definition}),
+        ):
+            _dispose_app_engine()
+            client = TestClient(app)
+            res = client.get(f"/organizations/{organization_id}/connectors/ado/scope-options")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["connection_id"] == connection_id
+        assert body["scope_options"] == [{"id": "hitesh-specmate", "label": "hitesh-specmate"}]
     finally:
         _cleanup(organization_id)

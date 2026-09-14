@@ -11,7 +11,7 @@ interface ScopeOption {
   label: string;
 }
 
-const ORG_LEVEL_TOOLS = ['jira', 'github'] as const;
+const ORG_LEVEL_TOOLS = ['jira', 'github', 'ado'] as const;
 const TOOL_LABEL: Record<string, string> = { jira: 'Jira', ado: 'Azure DevOps', github: 'GitHub' };
 
 export function ConnectToolModal({
@@ -124,10 +124,6 @@ function ToolPicker({ onPick, error }: { onPick: (tool: string) => void; error: 
           </button>
         ))}
       </div>
-      <p className="mt-3 text-xs text-sub">
-        Azure DevOps connects per-workspace with a personal access token — set it up from a
-        project&apos;s connector settings.
-      </p>
       {error ? <p className="mt-4 text-sm text-red">{error}</p> : null}
     </div>
   );
@@ -205,7 +201,7 @@ function ScopePicker({
       // page. Best-effort: the org connection + workspace scope are already
       // saved at this point, so a mapping failure here (e.g. no project yet)
       // surfaces as a warning, not a blocker to calling this tool "connected."
-      if (projectId && (toolKey === 'jira' || toolKey === 'github')) {
+      if (projectId && (toolKey === 'jira' || toolKey === 'github' || toolKey === 'ado')) {
         const mappingRes = await fetch(
           `/api/workspaces/${workspaceId}/projects/${projectId}/publish-mapping/${toolKey}`,
           {
@@ -247,7 +243,7 @@ function ScopePicker({
   return (
     <div>
       <label htmlFor="tool-scope" className="mb-2 block text-sm font-semibold text-ink">
-        {toolKey === 'jira' ? 'Board' : 'Repository'}
+        {toolKey === 'jira' ? 'Board' : toolKey === 'ado' ? 'Project' : 'Repository'}
       </label>
       <select
         id="tool-scope"

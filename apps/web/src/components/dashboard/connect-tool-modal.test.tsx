@@ -17,7 +17,7 @@ describe('ConnectToolModal', () => {
     (window as unknown as { location: { href: string } }).location = { href: '' };
   });
 
-  it('shows Jira and GitHub as pickable, with a note that ADO connects per-workspace', () => {
+  it('shows Jira, GitHub, and Azure DevOps as pickable, org-level authorize options', () => {
     render(
       <ConnectToolModal
         organizationId="org-1"
@@ -28,7 +28,7 @@ describe('ConnectToolModal', () => {
     );
     expect(screen.getByRole('button', { name: 'Jira' })).toBeDefined();
     expect(screen.getByRole('button', { name: 'GitHub' })).toBeDefined();
-    expect(screen.getByText(/azure devops connects per-workspace/i)).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Azure DevOps' })).toBeDefined();
   });
 
   it('creates an org wizard session and redirects to the OAuth start endpoint on pick', async () => {
@@ -165,6 +165,73 @@ describe('ConnectToolModal', () => {
     expect(fetchMock).not.toHaveBeenCalledWith(
       expect.stringContaining('publish-mapping'),
       expect.anything(),
+    );
+  });
+
+  it('creates an org wizard session and redirects to the OAuth start endpoint for Azure DevOps', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id: 'org-wiz-ado-1' }) }),
+    );
+    render(
+      <ConnectToolModal
+        organizationId="org-1"
+        workspaceId="ws-1"
+        defaultProjectId="proj-1"
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Azure DevOps' }));
+
+    await waitFor(() =>
+      expect(window.location.href).toBe(
+        '/api/connectors/ado/oauth/start?org_wizard_session_id=org-wiz-ado-1',
+      ),
+    );
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/organizations/org-1/wizard-sessions',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ tool_key: 'ado' }) }),
+    );
+  });
+
+  it('labels the scope picker "Project" and creates the ADO publish mapping on confirm', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('scope-options')) {
+          return {
+            ok: true,
+            json: async () => ({
+              connection_id: 'conn-ado-1',
+              scope_options: [{ id: 'hitesh-specmate', label: 'hitesh-specmate' }],
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+    render(
+      <ConnectToolModal
+        organizationId="org-1"
+        workspaceId="ws-1"
+        initialToolKey="ado"
+        defaultProjectId="proj-1"
+        onClose={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByRole('combobox')).toBeDefined());
+    expect(screen.getByText('Project')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+
+    await waitFor(() => expect(screen.getByText(/is connected for this workspace/i)).toBeDefined());
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/workspaces/ws-1/projects/proj-1/publish-mapping/ado',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ remote_project: 'hitesh-specmate' }),
+      }),
     );
   });
 

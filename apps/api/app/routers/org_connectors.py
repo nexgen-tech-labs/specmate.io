@@ -134,18 +134,23 @@ class ScopeOptionsResponse(BaseModel):
     scope_options: list[ScopeOptionResponse]
 
 
-_ORG_LEVEL_TOOLS = {"jira", "github"}
+_ORG_LEVEL_TOOLS = {"jira", "github", "ado"}
 
 
 async def _resolve_org_connection(session: AsyncSession, tool_key: str, organization_id: str) -> object:
     """Org-level connection resolution — mirrors connectors.py's
     _resolve_connection. Caller must have already checked tool_key is in
-    _ORG_LEVEL_TOOLS (ADO has no org-level Connection support yet, same gap
-    as its workspace-level PAT-only auth)."""
+    _ORG_LEVEL_TOOLS. ADO joined Jira/GitHub here once its delegated OAuth
+    (Issue 10.4) gave resolve_ado_connection the same organization_id-scoped
+    shape — previously ADO was workspace-level PAT-only."""
     if tool_key == "jira":
         from app.services.connectors.jira_auth import resolve_jira_connection
 
         return await resolve_jira_connection(session, organization_id=organization_id)
+    if tool_key == "ado":
+        from app.services.connectors.ado_auth import resolve_ado_connection
+
+        return await resolve_ado_connection(session, organization_id=organization_id)
     from app.services.connectors.github_auth import resolve_github_connection
 
     return await resolve_github_connection(session, organization_id=organization_id)
