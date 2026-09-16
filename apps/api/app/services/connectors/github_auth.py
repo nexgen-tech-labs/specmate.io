@@ -35,6 +35,7 @@ _DEFAULT_BASE_URL = "https://api.github.com"
 class GitHubConnection(Protocol):
     def base_url(self) -> str: ...
     def headers(self) -> dict[str, str]: ...
+    def repos_discovery_url(self) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,13 @@ class TokenConnection:
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         }
+
+    def repos_discovery_url(self) -> str:
+        # /user/repos lists repos the authenticated USER can access — correct
+        # for both env-configured PAT and per-workspace OAuth tokens, but NOT
+        # for an installation token (see InstallationTokenConnection below,
+        # which overrides this to /installation/repositories instead).
+        return f"{self.base_url()}/user/repos"
 
 
 def get_github_connection() -> TokenConnection:
@@ -114,6 +122,9 @@ class OAuthTokenConnection:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    def repos_discovery_url(self) -> str:
+        return f"{self.base_url()}/user/repos"
+
 
 async def resolve_github_connection(
     session: "AsyncSession",
@@ -122,13 +133,15 @@ async def resolve_github_connection(
     organization_id: str | None = None,
 ) -> GitHubConnection:
     """Connection resolution (Issue #101, extended for org-level auth by the
-    Onboarding Flow redesign): prefers a stored OAuth Connection for the given
-    workspace OR organization (exactly one must be passed), falls back to the
-    single-tenant env-configured connection unchanged when no workspace-scoped
-    row exists — so GitHub publishing keeps working exactly as before for
-    every workspace that hasn't gone through the OAuth wizard. Org-level
-    lookups have no env-configured fallback — env config has no notion of
-    "organization"."""
+    Onboarding Flow redesign, and for GitHub App installs by Issue 10.3):
+    prefers a claimed GitHub App install for the workspace (workspace-scoped
+    only — GitHub App installs are per-account, not per-organization the way
+    SpecMate models orgs, so there's no org-level App lookup), then a stored
+    OAuth Connection for the given workspace OR organization (exactly one
+    must be passed), falls back to the single-tenant env-configured
+    connection unchanged when no workspace-scoped row exists. Org-level
+    OAuth lookups have no env-configured fallback — env config has no notion
+    of "organization"."""
     from sqlalchemy import select
 
     from app.models import Connection
@@ -136,6 +149,16 @@ async def resolve_github_connection(
 
     if (workspace_id is None) == (organization_id is None):
         raise ValueError("Pass exactly one of workspace_id or organization_id.")
+
+    if workspace_id is not None:
+        from app.services.connectors.github_app_auth import (
+            get_claimed_installation_id,
+            resolve_installation_connection,
+        )
+
+        installation_id = await get_claimed_installation_id(session, workspace_id)
+        if installation_id is not None:
+            return await resolve_installation_connection(installation_id)
 
     scope_column = Connection.workspaceId if workspace_id is not None else Connection.organizationId
     scope_id = workspace_id if workspace_id is not None else organization_id
@@ -156,14 +179,21 @@ async def resolve_github_connection(
 
 
 async def check_connection_health(connection: GitHubConnection) -> dict[str, object]:
-    """Issue 7.1's health check."""
+    """Issue 7.1's health check. GitHub App installations have no /user
+    endpoint (there's no "user" behind an App install — only an installation
+    on some account), so this checks the connection's own repo-discovery
+    endpoint instead, which every connection type implements."""
     try:
         async with httpx.AsyncClient(headers=connection.headers(), timeout=15) as client:
-            response = await client.get(f"{connection.base_url()}/user")
+            if isinstance(connection, TokenConnection | OAuthTokenConnection):
+                response = await client.get(f"{connection.base_url()}/user")
+            else:
+                response = await client.get(connection.repos_discovery_url(), params={"per_page": 1})
         if response.status_code == 200:
             payload = response.json()
-            return {"ok": True, "account": payload.get("login")}
-        if response.status_code == 401:
+            account = payload.get("login") if isinstance(payload, dict) else None
+            return {"ok": True, "account": account}
+        if response.status_code in (401, 403):
             return {"ok": False, "reason": "Token is invalid or expired — reconnect required."}
         return {"ok": False, "status": response.status_code, "reason": "Unexpected response."}
     except httpx.HTTPError as exc:

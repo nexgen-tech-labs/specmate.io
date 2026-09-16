@@ -201,6 +201,7 @@ model Workspace {
   snapshots                Snapshot[]
   usagePeriods             UsagePeriod[]
   atlassianConnectInstalls AtlassianConnectInstall[]
+  gitHubAppInstalls        GitHubAppInstall[]
   apiRateLimitCounters     ApiRateLimitCounter[]
   usageReconciliationFlags UsageReconciliationFlag[]
   connections              Connection[]
@@ -233,6 +234,32 @@ model AtlassianConnectInstall {
   claimedAt     DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id])
+}
+
+// A GitHub App installation (Issue 10.3) — mirrors AtlassianConnectInstall's
+// shape exactly: GitHub POSTs the `installation` webhook event before any
+// SpecMate workspace is known, so `workspaceId` is nullable until an admin
+// claims it via a settings page. `installationId` is GitHub's stable
+// identifier for one App-install on one account (org or user); the App's
+// private key (used to mint short-lived installation access tokens) is a
+// single global secret shared by every install, not stored per-row here —
+// see ado_auth.py/jira_auth.py's env-configured secrets for the analogous
+// single-tenant-secret pattern.
+model GitHubAppInstall {
+  id                  String    @id @default(cuid())
+  installationId      BigInt    @unique
+  accountLogin        String
+  accountType         String
+  repositorySelection String
+  installedAt         DateTime  @default(now())
+  suspendedAt         DateTime?
+  uninstalledAt       DateTime?
+  workspaceId         String?
+  claimedAt           DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   workspace Workspace? @relation(fields: [workspaceId], references: [id])
 }

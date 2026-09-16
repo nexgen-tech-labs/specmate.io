@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     Enum,
     Float,
@@ -515,6 +516,29 @@ class AtlassianConnectInstall(Base):
     displayUrl: Mapped[str | None] = mapped_column(String, nullable=True)
     productType: Mapped[str | None] = mapped_column(String, nullable=True)
     installedAt: Mapped[datetime] = mapped_column(DateTime)
+    uninstalledAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    workspaceId: Mapped[str | None] = mapped_column(ForeignKey("Workspace.id"), nullable=True)
+    claimedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(DateTime)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime)
+
+
+class GitHubAppInstall(Base):
+    """One row per GitHub account with the SpecMate GitHub App installed
+    (Issue 10.3) — read-only from apps/api's side; apps/web's installation
+    webhook and the workspace-claim endpoint own writes. Used here only to
+    resolve an installation_id for a claimed workspace (see
+    github_app_auth.get_claimed_installation_id)."""
+
+    __tablename__ = "GitHubAppInstall"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    installationId: Mapped[int] = mapped_column(BigInteger, unique=True)
+    accountLogin: Mapped[str] = mapped_column(String)
+    accountType: Mapped[str] = mapped_column(String)
+    repositorySelection: Mapped[str] = mapped_column(String)
+    installedAt: Mapped[datetime] = mapped_column(DateTime)
+    suspendedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     uninstalledAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     workspaceId: Mapped[str | None] = mapped_column(ForeignKey("Workspace.id"), nullable=True)
     claimedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

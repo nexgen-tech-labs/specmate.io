@@ -32,7 +32,7 @@ async def discover_repos(
     try:
         response = await transport.request(
             "GET",
-            f"{connection.base_url()}/user/repos",
+            connection.repos_discovery_url(),
             target="github",
             headers=connection.headers(),
             params={"per_page": 50, "sort": "updated"},
@@ -41,9 +41,19 @@ async def discover_repos(
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise ConnectorError(f"GitHub repo discovery failed: {exc}") from exc
+    payload = response.json()
+    # /user/repos (TokenConnection/OAuthTokenConnection) returns a bare array
+    # with a per-repo "permissions" object to filter on; /installation/repositories
+    # (InstallationTokenConnection) wraps the list in {"repositories": [...]}
+    # and includes no "permissions" key at all — every repo it lists is one
+    # the App's installation was explicitly granted push access to, so there's
+    # nothing to filter there.
+    if isinstance(payload, dict):
+        repos = payload["repositories"]
+        return [{"full_name": r["full_name"], "id": str(r["id"])} for r in repos]
     return [
         {"full_name": r["full_name"], "id": str(r["id"])}
-        for r in response.json()
+        for r in payload
         if r.get("permissions", {}).get("push")
     ]
 

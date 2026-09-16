@@ -56,6 +56,20 @@ class Settings(BaseSettings):
     # and lives in apps/web, not here).
     github_oauth_app_client_id: str = ""
     github_oauth_app_client_secret: str = ""
+    # GitHub App (Issue 10.3, GitHub Marketplace) — a THIRD, distinct GitHub
+    # registration from both GITHUB_TOKEN (env-configured PAT) and the OAuth
+    # App above. A GitHub App authenticates as an installation (an org/user
+    # installed it on some/all of their repos) rather than as a user or a
+    # single ops-configured token — required for GitHub Marketplace listings.
+    # GITHUB_APP_PRIVATE_KEY is the PEM-encoded private key generated when the
+    # App is registered (Settings > Developer settings > GitHub Apps > your
+    # app > Generate a private key) — used to sign short-lived RS256 JWTs,
+    # which are then exchanged for even-shorter-lived per-installation access
+    # tokens (see github_app_auth.py). GITHUB_APP_WEBHOOK_SECRET verifies the
+    # X-Hub-Signature-256 header on incoming installation lifecycle webhooks.
+    github_app_id: str = ""
+    github_app_private_key: str = ""
+    github_app_webhook_secret: str = ""
     # Base URL of the apps/web frontend (Issue #101) — used only to build the
     # redirect target after the GitHub OAuth callback completes, so the user
     # lands back in the wizard UI instead of seeing raw JSON. Not used for
