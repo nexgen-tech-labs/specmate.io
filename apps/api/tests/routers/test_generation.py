@@ -38,6 +38,7 @@ from app.models import (
     DraftItemType,
     GenerationRun,
     GenerationRunStage,
+    Job,
     Project,
     RawRequirement,
     ReferenceItem,
@@ -343,6 +344,7 @@ async def _cleanup(ids: dict[str, object]) -> None:
             if item_ids:
                 await session.execute(delete(TraceLink).where(TraceLink.draftItemId.in_(item_ids)))
                 await session.execute(delete(DraftItem).where(DraftItem.id.in_(item_ids)))
+            await session.execute(delete(Job).where(Job.projectId == project_id))
             await session.execute(delete(GenerationRun).where(GenerationRun.projectId == project_id))
             await session.execute(delete(ReferenceItem).where(ReferenceItem.projectId == project_id))
             source_ids = [
@@ -431,23 +433,86 @@ def _clear_override() -> None:
     _dispose_app_engine()
 
 
+def _submit(client: TestClient, method: str, url: str, **kwargs: object) -> dict:
+    """POSTs to an async-job-enqueuing endpoint and returns the completed
+    Job's body. TestClient runs BackgroundTasks synchronously before the
+    original POST call even returns (Starlette's TestClient has no separate
+    request/response lifecycle), so by the time this function's own GET
+    fires, the job is already DONE or FAILED — no actual polling loop is
+    needed, just one GET to read the outcome. Raises AssertionError with the
+    job's error message if the job failed (mirroring the old synchronous
+    tests' `assert response.status_code == 200, response.text` pattern).
+
+    Disposes the global db_module.engine between the POST and the GET: the
+    POST's background task opened its own connection via that same pooled
+    engine (app.services.jobs.run_job uses async_session_factory, which
+    wraps db_module.engine) — asyncpg connections aren't safe to reuse
+    concurrently, and Starlette's TestClient runs the whole request
+    (including background tasks) synchronously on one event loop, so without
+    disposing first the follow-up GET can grab a connection asyncpg still
+    considers mid-operation ("cannot perform operation: another operation is
+    in progress")."""
+    response = getattr(client, method)(url, **kwargs)
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    _dispose_app_engine()
+    job = client.get(f"/jobs/{job_id}").json()
+    assert job["status"] in ("DONE", "FAILED"), job
+    return job
+
+
+def _submit_expect_done(client: TestClient, method: str, url: str, **kwargs: object) -> dict:
+    job = _submit(client, method, url, **kwargs)
+    assert job["status"] == "DONE", job["error"]
+    return job
+
+
+async def _fetch_run_body(run_id: str) -> dict[str, object]:
+    """Rebuilds the old synchronous response body's stage/stats/tag/name
+    fields from the DB — the async endpoints no longer return these
+    directly (only a job_id), so tests that asserted on them now fetch the
+    GenerationRun row instead."""
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with AsyncSession(engine) as session:
+            run = await session.get(GenerationRun, run_id)
+            assert run is not None
+            return {
+                "run_id": run.id,
+                "stage": run.stage.value,
+                "tag": run.tag,
+                "name": run.name,
+                "stats": (
+                    {
+                        **(run.stats or {}),
+                        "queue_wait_seconds_total": run.queueWaitSecondsTotal,
+                        "queue_depth_at_submit_max": run.queueDepthAtSubmitMax,
+                    }
+                    if run.stats is not None
+                    else None
+                ),
+            }
+    finally:
+        await engine.dispose()
+
+
 def _generate_epics_and_downstream(client: TestClient, project_id: str) -> tuple[dict, dict]:
     """Drives the full two-step flow: POST /generate (epics only), approve the
-    epic(s) it produced, then POST the downstream call. Returns both responses'
-    JSON bodies."""
-    epics_response = client.post(f"/projects/{project_id}/generate", json={})
-    assert epics_response.status_code == 200, epics_response.text
-    epics_body = epics_response.json()
+    epic(s) it produced, then POST the downstream call. Returns both calls'
+    reconstructed run bodies (stage/stats/tag/name), same shape the old
+    synchronous endpoints used to return directly."""
+    epics_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
+    epics_body = asyncio.run(_fetch_run_body(epics_job["result_ref"]))
     assert epics_body["stage"] == "EPICS_PENDING_REVIEW"
 
     _dispose_app_engine()
     asyncio.run(_approve_all_epics(project_id))
 
-    downstream_response = client.post(
-        f"/generation-runs/{epics_body['run_id']}/generate-downstream", json={}
+    downstream_job = _submit_expect_done(
+        client, "post", f"/generation-runs/{epics_body['run_id']}/generate-downstream", json={}
     )
-    assert downstream_response.status_code == 200, downstream_response.text
-    return epics_body, downstream_response.json()
+    downstream_body = asyncio.run(_fetch_run_body(downstream_job["result_ref"]))
+    return epics_body, downstream_body
 
 
 def test_full_generation_run_produces_hierarchy_traces_scores_and_flags() -> None:
@@ -523,14 +588,12 @@ def test_generate_epics_persists_only_epics_and_awaits_review() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
 
-    assert response.status_code == 200
-    body = response.json()
+    body = asyncio.run(_fetch_run_body(job["result_ref"]))
     assert body["stage"] == "EPICS_PENDING_REVIEW"
-    assert body["reused_existing_run"] is False
     assert body["stats"]["items_by_type"] == {"EPIC": 1}
 
     items = asyncio.run(_fetch_items(project_id))
@@ -548,16 +611,21 @@ def test_generate_downstream_requires_approved_epic() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        epics_response = client.post(f"/projects/{project_id}/generate", json={})
-        run_id = epics_response.json()["run_id"]
+        epics_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
+        run_id = epics_job["result_ref"]
         _dispose_app_engine()
-        # No approval step — every epic is still PENDING.
-        downstream_response = client.post(f"/generation-runs/{run_id}/generate-downstream", json={})
+        # No approval step — every epic is still PENDING. This is a job
+        # FAILURE now (validation moved inside generate_downstream's own
+        # AI-calling job, not a synchronous 4xx at enqueue time), so the
+        # error message is checked via the job's `error` field.
+        downstream_job = _submit(
+            client, "post", f"/generation-runs/{run_id}/generate-downstream", json={}
+        )
     finally:
         _clear_override()
 
-    assert downstream_response.status_code == 422
-    assert "approve" in downstream_response.json()["detail"].lower()
+    assert downstream_job["status"] == "FAILED"
+    assert "approve" in (downstream_job["error"] or "").lower()
 
     asyncio.run(_cleanup(ids))
 
@@ -578,7 +646,8 @@ def test_generate_downstream_returns_409_when_already_complete() -> None:
     try:
         epics_body, _ = _generate_epics_and_downstream(client, project_id)
         _dispose_app_engine()
-        # Run is now COMPLETE — calling downstream again should be rejected.
+        # Run is now COMPLETE — calling downstream again should be rejected
+        # synchronously (this check still runs before enqueueing).
         second = client.post(
             f"/generation-runs/{epics_body['run_id']}/generate-downstream", json={}
         )
@@ -593,23 +662,23 @@ def test_generate_downstream_returns_409_when_already_complete() -> None:
 def test_generate_again_with_no_new_sources_raises_clear_error() -> None:
     """Source-scoped generation (each source is claimed by exactly one run, via
     generatedInRunId) means re-calling /generate with nothing new to process no
-    longer silently reuses the prior run — it raises a clear 422 telling the
-    reviewer to add a new source or remove an existing one."""
+    longer silently reuses the prior run — it fails the job with a clear
+    message telling the reviewer to add a new source or remove an existing one."""
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
     project_id = str(ids["project_id"])
 
     client = _client_with_fake(chunk_ids)
     try:
-        first = client.post(f"/projects/{project_id}/generate", json={})
+        first = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
         _dispose_app_engine()
-        second = client.post(f"/projects/{project_id}/generate", json={})
+        second = _submit(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
 
-    assert first.json()["reused_existing_run"] is False
-    assert second.status_code == 422
-    assert "already been included" in second.json()["detail"]
+    assert first["status"] == "DONE"
+    assert second["status"] == "FAILED"
+    assert "already been included" in (second["error"] or "")
     assert len(asyncio.run(_fetch_items(project_id))) == 1  # still just the one epic
 
     asyncio.run(_cleanup(ids))
@@ -622,33 +691,34 @@ def test_generate_response_includes_ai_suggested_tag_and_name() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
 
-    body = response.json()
+    body = asyncio.run(_fetch_run_body(job["result_ref"]))
     assert body["tag"] == "payments"
     assert body["name"] is not None
-    assert body["name"].endswith("-payments-generated01")
+    assert body["name"].endswith("-payments-generated01")  # type: ignore[union-attr]
 
     asyncio.run(_cleanup(ids))
 
 
 def test_generate_epics_response_surfaces_queue_metrics() -> None:
-    """The epics-only response (before any downstream call) must already
-    reflect the clustering+epics passes' queue-wait data (Issue #115) — not
-    just the final downstream response."""
+    """The epics-only run (before any downstream call) must already reflect
+    the clustering+epics passes' queue-wait data (Issue #115) — not just the
+    final downstream run."""
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
     project_id = str(ids["project_id"])
 
     client = _client_with_fake(chunk_ids)
     try:
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
 
-    stats = response.json()["stats"]
+    stats = asyncio.run(_fetch_run_body(job["result_ref"]))["stats"]
+    assert stats is not None
     # Clustering + epics = 2 calls, each contributing 0.5s from FakeAdapter.
     assert stats["queue_wait_seconds_total"] == pytest.approx(1.0)
     assert stats["queue_depth_at_submit_max"] == 2
@@ -668,11 +738,11 @@ def test_generate_epics_stamps_contributing_sources() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
 
-    run_id = response.json()["run_id"]
+    run_id = job["result_ref"]
     assert asyncio.run(_get_source_generated_run_id(source_id)) == run_id
 
     asyncio.run(_cleanup(ids))
@@ -688,10 +758,11 @@ def test_second_generate_only_processes_the_newly_added_source() -> None:
 
     client = _client_with_fake(chunk_ids_a)
     try:
-        first = client.post(f"/projects/{project_id}/generate", json={})
+        first_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
-    assert first.json()["stats"]["fragment_count"] == 3
+    first_body = asyncio.run(_fetch_run_body(first_job["result_ref"]))
+    assert first_body["stats"]["fragment_count"] == 3  # type: ignore[index]
     _dispose_app_engine()
 
     new_source = asyncio.run(
@@ -708,13 +779,13 @@ def test_second_generate_only_processes_the_newly_added_source() -> None:
 
     client = _client_with_fake(chunk_ids_b)
     try:
-        second = client.post(f"/projects/{project_id}/generate", json={})
+        second_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
 
-    second_body = second.json()
-    assert second_body["run_id"] != first.json()["run_id"]
-    assert second_body["stats"]["fragment_count"] == 2  # only the new source's fragments
+    second_body = asyncio.run(_fetch_run_body(second_job["result_ref"]))
+    assert second_body["run_id"] != first_body["run_id"]
+    assert second_body["stats"]["fragment_count"] == 2  # type: ignore[index] # only the new source's fragments
     assert asyncio.run(_get_source_generated_run_id(str(new_source["source_id"]))) == (
         second_body["run_id"]
     )
@@ -732,17 +803,18 @@ def test_generate_downstream_only_uses_its_own_run_sources() -> None:
 
     client = _client_with_fake(chunk_ids_a)
     try:
-        first_response = client.post(f"/projects/{project_id}/generate", json={})
-        first_run_id = first_response.json()["run_id"]
+        first_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
+        first_run_id = first_job["result_ref"]
         _dispose_app_engine()
         asyncio.run(_approve_all_epics(project_id))
-        downstream_response = client.post(
-            f"/generation-runs/{first_run_id}/generate-downstream", json={}
+        downstream_job = _submit_expect_done(
+            client, "post", f"/generation-runs/{first_run_id}/generate-downstream", json={}
         )
     finally:
         _clear_override()
 
-    downstream_stats = downstream_response.json()["stats"]
+    downstream_stats = asyncio.run(_fetch_run_body(downstream_job["result_ref"]))["stats"]
+    assert downstream_stats is not None
     # fragment_count in the final stats reflects only this run's own source
     # (the fixture's 3 fragments) — a second source added afterward must not
     # leak into a run that already completed its epics pass beforehand.
@@ -758,10 +830,10 @@ def test_patch_generation_run_renames_tag_and_name() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        generate_response = client.post(f"/projects/{project_id}/generate", json={})
+        generate_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
-    run_id = generate_response.json()["run_id"]
+    run_id = generate_job["result_ref"]
 
     client = TestClient(app)
     patch_response = client.patch(
@@ -791,10 +863,10 @@ def test_patch_generation_run_rejects_empty_name() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        generate_response = client.post(f"/projects/{project_id}/generate", json={})
+        generate_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
-    run_id = generate_response.json()["run_id"]
+    run_id = generate_job["result_ref"]
 
     client = TestClient(app)
     response = client.patch(f"/generation-runs/{run_id}", json={"name": "   "})
@@ -813,8 +885,8 @@ def test_generate_downstream_only_covers_approved_epics() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        epics_response = client.post(f"/projects/{project_id}/generate", json={})
-        run_id = epics_response.json()["run_id"]
+        epics_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
+        run_id = epics_job["result_ref"]
         _dispose_app_engine()
 
         # Reject the only epic (this fixture's FakeAdapter always drafts exactly
@@ -837,11 +909,13 @@ def test_generate_downstream_only_covers_approved_epics() -> None:
                 await engine.dispose()
 
         asyncio.run(reject_epic())
-        downstream_response = client.post(f"/generation-runs/{run_id}/generate-downstream", json={})
+        downstream_job = _submit(
+            client, "post", f"/generation-runs/{run_id}/generate-downstream", json={}
+        )
     finally:
         _clear_override()
 
-    assert downstream_response.status_code == 422
+    assert downstream_job["status"] == "FAILED"
 
     asyncio.run(_cleanup(ids))
 
@@ -889,12 +963,11 @@ def test_generate_with_large_fragments_triggers_summarization() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
 
-    assert response.status_code == 200, response.text
-    run_id = response.json()["run_id"]
+    run_id = job["result_ref"]
 
     async def fetch_run() -> GenerationRun:
         engine = create_async_engine(settings.database_url)
@@ -922,12 +995,11 @@ def test_generate_with_small_fragments_skips_summarization() -> None:
 
     client = _client_with_fake(chunk_ids)
     try:
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         _clear_override()
 
-    assert response.status_code == 200, response.text
-    run_id = response.json()["run_id"]
+    run_id = job["result_ref"]
 
     async def fetch_run() -> GenerationRun:
         engine = create_async_engine(settings.database_url)
@@ -989,15 +1061,16 @@ def test_regenerate_item_creates_revision_and_preserves_original() -> None:
         items = asyncio.run(_fetch_items(project_id))
         erp_story = next(i for i in items if "ERP" in i.title)
 
-        response = client.post(
+        job = _submit_expect_done(
+            client,
+            "post",
             f"/draft-items/{erp_story.id}/regenerate",
             json={"context": "The export targets ERP v3 via REST.", "workspace_id": str(ids["workspace_id"])},
         )
     finally:
         _clear_override()
 
-    assert response.status_code == 200
-    new_id = response.json()["new_item_id"]
+    new_id = job["result_ref"]
 
     async def fetch(item_id: str) -> DraftItem | None:
         engine = create_async_engine(settings.database_url)
@@ -1040,7 +1113,7 @@ def test_generation_summary_reports_live_counts() -> None:
     asyncio.run(_cleanup(ids))
 
 
-def test_generate_with_no_fragments_returns_422() -> None:
+def test_generate_with_no_fragments_fails_the_job() -> None:
     async def make_empty_project() -> dict[str, str]:
         engine = create_async_engine(settings.database_url)
         try:
@@ -1060,15 +1133,16 @@ def test_generate_with_no_fragments_returns_422() -> None:
     ids = asyncio.run(make_empty_project())
     client = _client_with_fake([])
     try:
-        response = client.post(f"/projects/{ids['project_id']}/generate", json={})
+        job = _submit(client, "post", f"/projects/{ids['project_id']}/generate", json={})
     finally:
         _clear_override()
-    assert response.status_code == 422
+    assert job["status"] == "FAILED"
 
     async def cleanup() -> None:
         engine = create_async_engine(settings.database_url)
         try:
             async with AsyncSession(engine) as session:
+                await session.execute(delete(Job).where(Job.projectId == ids["project_id"]))
                 await session.execute(delete(Project).where(Project.id == ids["project_id"]))
                 await purge_audit_events(session, ids["workspace_id"])
                 await session.execute(delete(Workspace).where(Workspace.id == ids["workspace_id"]))
@@ -1079,34 +1153,37 @@ def test_generate_with_no_fragments_returns_422() -> None:
     asyncio.run(cleanup())
 
 
-def test_generate_returns_503_when_ai_generation_fails() -> None:
+def test_generate_fails_the_job_when_ai_generation_fails() -> None:
+    """AI failures now surface as a FAILED Job (checked by the frontend via
+    polling), not a synchronous 503 — but the underlying safety property
+    (never leak raw provider exception text) still matters, since job.error
+    is exactly what a reviewer would see surfaced in the UI."""
     ids = asyncio.run(_create_fixture())
     project_id = str(ids["project_id"])
 
     app.dependency_overrides[get_generation_adapter] = lambda: FailingAdapter()
     client = TestClient(app)
     try:
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        job = _submit(client, "post", f"/projects/{project_id}/generate", json={})
     finally:
         app.dependency_overrides.pop(get_generation_adapter, None)
         _dispose_app_engine()
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
-    assert "SECRET-LOOKING-TOKEN" not in response.text
+    assert job["status"] == "FAILED"
+    assert "SECRET-LOOKING-TOKEN" not in (job["error"] or "")
 
     asyncio.run(_cleanup(ids))
 
 
-def test_generate_downstream_returns_503_when_ai_generation_fails() -> None:
+def test_generate_downstream_fails_the_job_when_ai_generation_fails() -> None:
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
     project_id = str(ids["project_id"])
 
     client = _client_with_fake(chunk_ids)
     try:
-        epics_response = client.post(f"/projects/{project_id}/generate", json={})
-        run_id = epics_response.json()["run_id"]
+        epics_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
+        run_id = epics_job["result_ref"]
         _dispose_app_engine()
         asyncio.run(_approve_all_epics(project_id))
     finally:
@@ -1115,19 +1192,19 @@ def test_generate_downstream_returns_503_when_ai_generation_fails() -> None:
     app.dependency_overrides[get_generation_adapter] = lambda: FailingAdapter()
     client = TestClient(app)
     try:
-        response = client.post(f"/generation-runs/{run_id}/generate-downstream", json={})
+        job = _submit(client, "post", f"/generation-runs/{run_id}/generate-downstream", json={})
     finally:
         app.dependency_overrides.pop(get_generation_adapter, None)
         _dispose_app_engine()
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
-    assert "SECRET-LOOKING-TOKEN" not in response.text
+    assert job["status"] == "FAILED"
+    assert job["error"] == AI_UNAVAILABLE_DETAIL
+    assert "SECRET-LOOKING-TOKEN" not in (job["error"] or "")
 
     asyncio.run(_cleanup(ids))
 
 
-def test_regenerate_item_returns_503_when_ai_generation_fails() -> None:
+def test_regenerate_item_fails_the_job_when_ai_generation_fails() -> None:
     ids = asyncio.run(_create_fixture())
     chunk_ids = list(map(str, ids["chunk_ids"]))  # type: ignore[arg-type]
     project_id = str(ids["project_id"])
@@ -1145,7 +1222,9 @@ def test_regenerate_item_returns_503_when_ai_generation_fails() -> None:
     app.dependency_overrides[get_generation_adapter] = lambda: FailingAdapter()
     client = TestClient(app)
     try:
-        response = client.post(
+        job = _submit(
+            client,
+            "post",
             f"/draft-items/{erp_story.id}/regenerate",
             json={"context": "The export targets ERP v3 via REST.", "workspace_id": str(ids["workspace_id"])},
         )
@@ -1153,9 +1232,9 @@ def test_regenerate_item_returns_503_when_ai_generation_fails() -> None:
         app.dependency_overrides.pop(get_generation_adapter, None)
         _dispose_app_engine()
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
-    assert "SECRET-LOOKING-TOKEN" not in response.text
+    assert job["status"] == "FAILED"
+    assert job["error"] == AI_UNAVAILABLE_DETAIL
+    assert "SECRET-LOOKING-TOKEN" not in (job["error"] or "")
 
     asyncio.run(_cleanup(ids))
 
@@ -1269,18 +1348,19 @@ def test_real_generation_adapter_composition_produces_a_run_end_to_end() -> None
         "app.services.ai.claude_adapter.AsyncAnthropic", return_value=mock_anthropic_client
     ):
         client = TestClient(app)
-        epics_response = client.post(f"/projects/{project_id}/generate", json={})
-        run_id = epics_response.json()["run_id"]
+        epics_job = _submit_expect_done(client, "post", f"/projects/{project_id}/generate", json={})
+        run_id = epics_job["result_ref"]
         _dispose_app_engine()
         asyncio.run(_approve_all_epics(project_id))
 
         client = TestClient(app)
-        response = client.post(f"/generation-runs/{run_id}/generate-downstream", json={})
+        downstream_job = _submit_expect_done(
+            client, "post", f"/generation-runs/{run_id}/generate-downstream", json={}
+        )
         _dispose_app_engine()
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["stats"]["item_count"] >= 1
+    body = asyncio.run(_fetch_run_body(downstream_job["result_ref"]))
+    assert body["stats"]["item_count"] >= 1  # type: ignore[index]
 
     async def count_call_logs() -> int:
         engine = create_async_engine(settings.database_url)
@@ -1301,9 +1381,10 @@ def test_real_generation_adapter_composition_produces_a_run_end_to_end() -> None
     asyncio.run(_cleanup(ids))
 
 
-def test_real_generation_adapter_composition_surfaces_rate_limit_as_503() -> None:
-    """Issue #107: the RateLimitError -> AIGenerationError -> 503 translation
-    through the real composed chain, not FailingAdapter's direct bypass."""
+def test_real_generation_adapter_composition_surfaces_rate_limit_as_a_failed_job() -> None:
+    """Issue #107: the RateLimitError -> AIGenerationError -> FAILED-job
+    translation through the real composed chain, not FailingAdapter's direct
+    bypass."""
     ids = asyncio.run(_create_fixture())
     workspace_id = str(ids["workspace_id"])
     project_id = str(ids["project_id"])
@@ -1322,11 +1403,11 @@ def test_real_generation_adapter_composition_surfaces_rate_limit_as_503() -> Non
         "app.services.ai.claude_adapter.AsyncAnthropic", return_value=mock_anthropic_client
     ):
         client = TestClient(app)
-        response = client.post(f"/projects/{project_id}/generate", json={})
+        job = _submit(client, "post", f"/projects/{project_id}/generate", json={})
         _dispose_app_engine()
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
+    assert job["status"] == "FAILED"
+    assert job["error"] == AI_UNAVAILABLE_DETAIL
 
     asyncio.run(_purge_ai_call_logs(workspace_id))
     asyncio.run(_cleanup(ids))

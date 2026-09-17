@@ -1,13 +1,20 @@
 """Generation endpoints (Epic 3): run the pipeline, regenerate one item with
-reviewer context (Issue 3.9), and query run stats (Issue 3.10). Same synchronous
-execution model as parsing — a job-table/worker is still the documented follow-up."""
+reviewer context (Issue 3.9), and query run stats (Issue 3.10).
+
+Generation-triggering endpoints (generate/generate-downstream/regenerate/
+targeted-regenerate) enqueue a Job and return 202 immediately rather than
+blocking on the underlying AI call — a large enough input's Anthropic call
+can legitimately take longer than any reasonable client-side timeout or
+Azure Container Apps' hard ingress timeout, which is exactly what caused a
+real production 504 (see Job's model docstring for the full story). The
+frontend polls GET /jobs/{job_id} (app/routers/jobs.py) until DONE/FAILED."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,37 +27,60 @@ from app.models import (
     DraftItemStatus,
     GenerationRun,
     GenerationRunStage,
+    JobType,
     Project,
     RawRequirement,
     Source,
     TraceLink,
 )
 from app.services.audit import record_audit_event
-from app.services.ai.adapter import AIAdapter, AIGenerationError, GenerationRequest, Message
+from app.services.ai.adapter import AIAdapter, GenerationRequest, Message
 from app.services.ai.claude_adapter import ClaudeAdapter
 from app.services.ai.logging_adapter import LoggingAdapter
 from app.services.ai.prompts.generation_v1 import GENERATION_PROMPT_VERSION, REGENERATE_V1
 from app.services.ai.scheduler import AIScheduler
 from app.services.ai.scheduling_adapter import SchedulingAdapter
-from app.services.generation.pipeline import GenerationError, generate_downstream, generate_epics
+from app.services.generation.pipeline import generate_downstream, generate_epics
 from app.services.generation.schemas import REGENERATE_SCHEMA
-from app.services.generation.targeted import (
-    TargetedRegenerationError,
-    TargetedRegenerationResult,
-    run_targeted_regeneration,
+from app.services.generation.targeted import run_targeted_regeneration
+from app.services.jobs import (
+    AI_UNAVAILABLE_DETAIL,  # noqa: F401 — re-exported; existing tests still import it from here
+    enqueue_job,
+    run_job,
 )
 
 router = APIRouter()
 
 _ai_scheduler = AIScheduler(max_concurrent=settings.max_concurrent_ai_calls)
 
-AI_UNAVAILABLE_DETAIL = "AI generation is temporarily unavailable. Please try again in a few moments."
-
 
 def get_generation_adapter(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> AIAdapter:
-    """FastAPI dependency — overridden in tests to inject a fake adapter."""
+    """FastAPI dependency — overridden in tests to inject a fake adapter.
+    Still declared as a normal dependency (even though no endpoint in this
+    file depends-injects it directly anymore, now that generation runs in a
+    background task) purely so existing tests' `app.dependency_overrides
+    [get_generation_adapter] = lambda: FakeAdapter()` keeps working — see
+    _adapter_for_background_task below, which is what background jobs
+    actually call."""
+    return SchedulingAdapter(LoggingAdapter(ClaudeAdapter(), session), _ai_scheduler)
+
+
+def _adapter_for_background_task(session: AsyncSession) -> AIAdapter:
+    """What every background job actually calls to get an adapter. Checks
+    for a test override on get_generation_adapter first (FastAPI's
+    dependency_overrides is just a plain dict, readable outside an actual
+    request) so existing tests overriding get_generation_adapter continue
+    to inject their FakeAdapter into background-task execution without
+    modification, even though the endpoint itself no longer depends-injects
+    it. Falls back to the real Claude-backed adapter when no override is
+    registered (production, and any test that doesn't override it)."""
+    from app.main import app as _app
+
+    override = _app.dependency_overrides.get(get_generation_adapter)
+    if override is not None:
+        return cast(AIAdapter, override())
     return SchedulingAdapter(LoggingAdapter(ClaudeAdapter(), session), _ai_scheduler)
 
 
@@ -76,50 +106,57 @@ class GenerateBody(BaseModel):
     pass
 
 
-class GenerateResponse(BaseModel):
-    run_id: str
-    stage: str
-    reused_existing_run: bool
-    stats: dict[str, object] | None
-    tag: str | None = None
-    name: str | None = None
+class EnqueuedJobResponse(BaseModel):
+    job_id: str
 
 
-@router.post("/projects/{project_id}/generate")
+async def _run_generate_epics_job(job_id: str, project_id: str) -> None:
+    async def _work(session: AsyncSession) -> str:
+        adapter = _adapter_for_background_task(session)
+        run = await generate_epics(project_id, session, adapter)
+        return run.id
+
+    await run_job(job_id, _work)
+
+
+@router.post("/projects/{project_id}/generate", status_code=202)
 async def generate(
     project_id: str,
     body: GenerateBody,
+    background_tasks: BackgroundTasks,
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    adapter: Annotated[AIAdapter, Depends(get_generation_adapter)],
-) -> GenerateResponse:
+) -> EnqueuedJobResponse:
     """Passes 1-2 only (cluster + epics) — see generate_downstream for the
     second explicit call that generates stories/tasks/supporting items for
-    whichever epics the reviewer approves."""
-    before = (
-        await session.execute(
-            select(func.count(GenerationRun.id)).where(GenerationRun.projectId == project_id)
-        )
-    ).scalar_one()
-    try:
-        run = await generate_epics(project_id, session, adapter)
-    except GenerationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except AIGenerationError as exc:
-        raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
+    whichever epics the reviewer approves.
 
-    after = (
-        await session.execute(
-            select(func.count(GenerationRun.id)).where(GenerationRun.projectId == project_id)
-        )
-    ).scalar_one()
-    return GenerateResponse(
-        run_id=run.id,
-        stage=run.stage.value,
-        reused_existing_run=after == before,
-        stats=_stats_with_queue_metrics(run),
-        tag=run.tag,
-        name=run.name,
+    Enqueues a Job and returns 202 immediately — generate_epics's own AI
+    calls (clustering + epics, +summarization for large inputs) run in a
+    background task rather than blocking this request, since a large enough
+    input can legitimately take longer than any client-side timeout or
+    Azure Container Apps' hard ingress timeout allows (the exact cause of a
+    real production 504). Poll GET /jobs/{job_id} for the result — DONE's
+    result_ref is the GenerationRun id; fetch it via
+    GET /projects/{project_id}/generation-summary or the review endpoints as
+    today. Only cheap, synchronous validation happens here (project exists)
+    — generate_epics' own richer validation (fragments exist, idempotency)
+    still runs, just inside the job, surfacing as a FAILED job with that
+    message rather than an immediate 4xx. This trades an immediate error
+    response for a uniform "poll for the outcome" contract; the frontend
+    already needs to poll for the success path, so a failed validation is
+    just another poll result rather than a special case."""
+    project = await session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found.")
+
+    job = await enqueue_job(
+        session,
+        type=JobType.GENERATE_EPICS,
+        workspace_id=project.workspaceId,
+        project_id=project_id,
     )
+    background_tasks.add_task(_run_generate_epics_job, job.id, project_id)
+    return EnqueuedJobResponse(job_id=job.id)
 
 
 class GenerateDownstreamBody(BaseModel):
@@ -127,22 +164,28 @@ class GenerateDownstreamBody(BaseModel):
     item_types: list[str] | None = None
 
 
-class GenerateDownstreamResponse(BaseModel):
-    run_id: str
-    stage: str
-    stats: dict[str, object] | None
+async def _run_generate_downstream_job(
+    job_id: str, run_id: str, item_types: set[str] | None
+) -> None:
+    async def _work(session: AsyncSession) -> str:
+        adapter = _adapter_for_background_task(session)
+        run = await generate_downstream(run_id, session, adapter, item_types=item_types)
+        return run.id
+
+    await run_job(job_id, _work)
 
 
-@router.post("/generation-runs/{run_id}/generate-downstream")
+@router.post("/generation-runs/{run_id}/generate-downstream", status_code=202)
 async def generate_downstream_endpoint(
     run_id: str,
     body: GenerateDownstreamBody,
+    background_tasks: BackgroundTasks,
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    adapter: Annotated[AIAdapter, Depends(get_generation_adapter)],
-) -> GenerateDownstreamResponse:
+) -> EnqueuedJobResponse:
     """Passes 3-5, scoped to whichever epics from `run_id` the reviewer has
     approved. Call this once at least one epic is APPROVED (via the normal
-    draft-item review/decision workflow)."""
+    draft-item review/decision workflow). Enqueues a Job and returns 202 —
+    see /projects/{project_id}/generate's docstring for why."""
     run = await session.get(GenerationRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Generation run not found.")
@@ -150,21 +193,19 @@ async def generate_downstream_endpoint(
         raise HTTPException(
             status_code=409, detail="This run has already completed downstream generation."
         )
-    try:
-        run = await generate_downstream(
-            run_id,
-            session,
-            adapter,
-            item_types=set(body.item_types) if body.item_types else None,
-        )
-    except GenerationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except AIGenerationError as exc:
-        raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
+    project = await session.get(Project, run.projectId)
+    assert project is not None
 
-    return GenerateDownstreamResponse(
-        run_id=run.id, stage=run.stage.value, stats=_stats_with_queue_metrics(run)
+    job = await enqueue_job(
+        session,
+        type=JobType.GENERATE_DOWNSTREAM,
+        workspace_id=project.workspaceId,
+        project_id=run.projectId,
+        input={"item_types": body.item_types} if body.item_types else None,
     )
+    item_types = set(body.item_types) if body.item_types else None
+    background_tasks.add_task(_run_generate_downstream_job, job.id, run_id, item_types)
+    return EnqueuedJobResponse(job_id=job.id)
 
 
 class UpdateGenerationRunBody(BaseModel):
@@ -212,25 +253,17 @@ class RegenerateBody(BaseModel):
     workspace_id: str
 
 
-class RegenerateResponse(BaseModel):
-    new_item_id: str
-    previous_item_id: str
-
-
-@router.post("/draft-items/{item_id}/regenerate")
-async def regenerate_item(
-    item_id: str,
-    body: RegenerateBody,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
-    adapter: Annotated[AIAdapter, Depends(get_generation_adapter)],
-) -> RegenerateResponse:
+async def _regenerate_item_work(
+    session: AsyncSession, item_id: str, context: str, workspace_id: str
+) -> str:
+    """The actual regenerate work (AI call + persistence) — runs inside the
+    background job. Callers (the job wrapper) treat any raised exception as
+    a job failure; the item-not-found/already-approved checks happen
+    synchronously in the endpoint instead, before the job is even enqueued,
+    since those are immediate 4xx/409s, not job failures."""
+    adapter = _adapter_for_background_task(session)
     item = await session.get(DraftItem, item_id)
-    if item is None or item.deletedAt is not None:
-        raise HTTPException(status_code=404, detail="Draft item not found.")
-    if item.status == DraftItemStatus.APPROVED:
-        raise HTTPException(
-            status_code=409, detail="Approved items are locked — reopen before regenerating."
-        )
+    assert item is not None  # re-checked here defensively; already validated by the endpoint
 
     trace_result = await session.execute(
         select(TraceLink, RawRequirement)
@@ -243,22 +276,19 @@ async def regenerate_item(
     user = (
         f"Item type: {item.type.value}\nTitle: {item.title}\nDescription: {item.description}\n"
         f"Source fragments:\n{source_context or '(none recorded)'}\n\n"
-        f"Reviewer's additional context:\n{body.context}"
+        f"Reviewer's additional context:\n{context}"
     )
-    try:
-        result = await adapter.generate(
-            GenerationRequest(
-                task="structuring",
-                system=REGENERATE_V1,
-                messages=[Message(role="user", content=user)],
-                schema_=REGENERATE_SCHEMA,
-                workspace_id=body.workspace_id,
-                project_id=item.projectId,
-                prompt_version=GENERATION_PROMPT_VERSION,
-            )
+    result = await adapter.generate(
+        GenerationRequest(
+            task="structuring",
+            system=REGENERATE_V1,
+            messages=[Message(role="user", content=user)],
+            schema_=REGENERATE_SCHEMA,
+            workspace_id=workspace_id,
+            project_id=item.projectId,
+            prompt_version=GENERATION_PROMPT_VERSION,
         )
-    except AIGenerationError as exc:
-        raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
+    )
 
     now = _now()
     new_item = DraftItem(
@@ -302,7 +332,7 @@ async def regenerate_item(
     item.updatedAt = now
     record_audit_event(
         session,
-        workspace_id=body.workspace_id,
+        workspace_id=workspace_id,
         project_id=item.projectId,
         action="draft_item.regenerated",
         entity_type="DraftItem",
@@ -310,10 +340,48 @@ async def regenerate_item(
         actor_type=AuditActorType.AI,
         before={"item_id": item.id, "title": item.title, "description": item.description},
         after={"title": new_item.title, "description": new_item.description},
-        metadata={"reviewer_context": body.context},
+        metadata={"reviewer_context": context},
     )
     await session.commit()
-    return RegenerateResponse(new_item_id=new_item.id, previous_item_id=item.id)
+    return new_item.id
+
+
+async def _run_regenerate_item_job(job_id: str, item_id: str, context: str, workspace_id: str) -> None:
+    async def _work(session: AsyncSession) -> str:
+        return await _regenerate_item_work(session, item_id, context, workspace_id)
+
+    await run_job(job_id, _work)
+
+
+@router.post("/draft-items/{item_id}/regenerate", status_code=202)
+async def regenerate_item(
+    item_id: str,
+    body: RegenerateBody,
+    background_tasks: BackgroundTasks,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> EnqueuedJobResponse:
+    """Enqueues a Job and returns 202 — see /projects/{project_id}/generate's
+    docstring for why. DONE's result_ref is the new DraftItem's id; the
+    previous item's id is item_id itself (unchanged, just soft-deleted)."""
+    item = await session.get(DraftItem, item_id)
+    if item is None or item.deletedAt is not None:
+        raise HTTPException(status_code=404, detail="Draft item not found.")
+    if item.status == DraftItemStatus.APPROVED:
+        raise HTTPException(
+            status_code=409, detail="Approved items are locked — reopen before regenerating."
+        )
+
+    job = await enqueue_job(
+        session,
+        type=JobType.REGENERATE_ITEM,
+        workspace_id=body.workspace_id,
+        project_id=item.projectId,
+        input={"context": body.context},
+    )
+    background_tasks.add_task(
+        _run_regenerate_item_job, job.id, item_id, body.context, body.workspace_id
+    )
+    return EnqueuedJobResponse(job_id=job.id)
 
 
 class TargetedRegenerateBody(BaseModel):
@@ -327,33 +395,52 @@ class TargetedRegenerateResponse(BaseModel):
     untouched_fragment_count: int
 
 
-@router.post("/sources/{source_id}/targeted-regenerate")
+async def _run_targeted_regenerate_job(
+    job_id: str, project_id: str, workspace_id: str, source_id: str
+) -> None:
+    async def _work(session: AsyncSession) -> str:
+        adapter = _adapter_for_background_task(session)
+        result = await run_targeted_regeneration(project_id, workspace_id, source_id, session, adapter)
+        # TargetedRegenerateResponse's shape has no single "the result" id
+        # (unlike a GenerationRun or DraftItem) — resultRef holds the whole
+        # structured outcome as JSON rather than a bare reference id.
+        return TargetedRegenerateResponse(
+            revised_item_ids=result.revised_item_ids,
+            new_item_ids=result.new_item_ids,
+            flagged_removed_item_ids=result.flagged_removed_item_ids,
+            untouched_fragment_count=result.untouched_fragment_count,
+        ).model_dump_json()
+
+    await run_job(job_id, _work)
+
+
+@router.post("/sources/{source_id}/targeted-regenerate", status_code=202)
 async def targeted_regenerate(
     source_id: str,
     body: TargetedRegenerateBody,
+    background_tasks: BackgroundTasks,
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    adapter: Annotated[AIAdapter, Depends(get_generation_adapter)],
-) -> TargetedRegenerateResponse:
-    """Issue 9.2: regenerate only the DraftItems affected by this source version's
-    diff (Issue 9.1), leaving everything else in the project untouched."""
+) -> EnqueuedJobResponse:
+    """Issue 9.2: regenerate only the DraftItems affected by this source
+    version's diff (Issue 9.1), leaving everything else in the project
+    untouched. Enqueues a Job and returns 202 — see
+    /projects/{project_id}/generate's docstring for why. DONE's result_ref
+    is a JSON-encoded TargetedRegenerateResponse (this endpoint's result has
+    no single natural id to reference, unlike the other generation jobs)."""
     source = await session.get(Source, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found.")
-    try:
-        result: TargetedRegenerationResult = await run_targeted_regeneration(
-            source.projectId, body.workspace_id, source_id, session, adapter
-        )
-    except TargetedRegenerationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except AIGenerationError as exc:
-        raise HTTPException(status_code=503, detail=AI_UNAVAILABLE_DETAIL) from exc
 
-    return TargetedRegenerateResponse(
-        revised_item_ids=result.revised_item_ids,
-        new_item_ids=result.new_item_ids,
-        flagged_removed_item_ids=result.flagged_removed_item_ids,
-        untouched_fragment_count=result.untouched_fragment_count,
+    job = await enqueue_job(
+        session,
+        type=JobType.TARGETED_REGENERATE,
+        workspace_id=body.workspace_id,
+        project_id=source.projectId,
     )
+    background_tasks.add_task(
+        _run_targeted_regenerate_job, job.id, source.projectId, body.workspace_id, source_id
+    )
+    return EnqueuedJobResponse(job_id=job.id)
 
 
 @router.get("/projects/{project_id}/generation-summary")

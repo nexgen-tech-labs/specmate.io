@@ -15,6 +15,7 @@ from app.routers import (
     github_oauth,
     health,
     jira_oauth,
+    jobs,
     org_connectors,
     publish,
     publish_ado,
@@ -51,6 +52,7 @@ app.include_router(wizard_sessions.router)
 app.include_router(org_connectors.router)
 app.include_router(connection_requests.router)
 app.include_router(generation.router)
+app.include_router(jobs.router)
 app.include_router(publish.router)
 app.include_router(publish_ado.router)
 app.include_router(publish_github.router)

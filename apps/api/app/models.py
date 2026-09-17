@@ -627,6 +627,54 @@ class GenerationRun(Base):
     )
 
 
+class JobType(str, enum.Enum):
+    GENERATE_EPICS = "GENERATE_EPICS"
+    GENERATE_DOWNSTREAM = "GENERATE_DOWNSTREAM"
+    REGENERATE_ITEM = "REGENERATE_ITEM"
+    TARGETED_REGENERATE = "TARGETED_REGENERATE"
+    PARSE_SOURCE = "PARSE_SOURCE"
+    REPARSE_PROJECT = "REPARSE_PROJECT"
+
+
+class JobStatus(str, enum.Enum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    DONE = "DONE"
+    FAILED = "FAILED"
+
+
+class Job(Base):
+    """Generic background-job tracking (see the Prisma schema's comment for
+    the full "why" — this is the Postgres job table architecture.md always
+    described, previously undelivered). Every AI-generation and
+    source-parsing endpoint now enqueues one of these and returns
+    immediately rather than blocking the request on the underlying work;
+    `resultRef`'s meaning depends on `type` (a GenerationRun id for
+    GENERATE_EPICS, a DraftItem id for REGENERATE_ITEM, a Source id for
+    PARSE_SOURCE, etc.)."""
+
+    __tablename__ = "Job"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_cuid)
+    type: Mapped[JobType] = mapped_column(Enum(JobType, name="JobType", create_type=False))
+    status: Mapped[JobStatus] = mapped_column(
+        Enum(JobStatus, name="JobStatus", create_type=False), default=JobStatus.QUEUED
+    )
+    workspaceId: Mapped[str] = mapped_column(ForeignKey("Workspace.id"))
+    projectId: Mapped[str] = mapped_column(ForeignKey("Project.id"))
+    input: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
+    resultRef: Mapped[str | None] = mapped_column(String, nullable=True)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+    createdAt: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)
+    )
+    updatedAt: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(UTC).replace(tzinfo=None)
+    )
+    startedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finishedAt: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class ReferenceItem(Base):
     """Read-only snapshot of an existing Jira/ADO/GitHub backlog item (Issues #14-16),
     pulled for duplicate-detection reference (Issue 3.5) — never edited or published.

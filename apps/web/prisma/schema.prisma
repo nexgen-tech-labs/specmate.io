@@ -202,6 +202,7 @@ model Workspace {
   usagePeriods             UsagePeriod[]
   atlassianConnectInstalls AtlassianConnectInstall[]
   gitHubAppInstalls        GitHubAppInstall[]
+  jobs                     Job[]
   apiRateLimitCounters     ApiRateLimitCounter[]
   usageReconciliationFlags UsageReconciliationFlag[]
   connections              Connection[]
@@ -434,6 +435,7 @@ model Project {
   publishMappings PublishMapping[]
   snapshots       Snapshot[]
   teamScopes      TeamProject[]
+  jobs            Job[]
   wizardSessions  WizardSession[]
 }
 
@@ -815,6 +817,56 @@ model GenerationRun {
   sources Source[]
 
   @@unique([projectId, contentHash])
+}
+
+// Generic background-job tracking (the "Postgres job table" architecture.md
+// has always described, previously undelivered — every AI-generation and
+// source-parsing endpoint ran fully synchronously in the request/response
+// cycle, which is what let a large enough input's Anthropic call outlast
+// both the client-side SDK timeout and Azure Container Apps' ingress
+// timeout). One row per background execution; `resultRef` is a free-form
+// identifier the job's TYPE defines the meaning of (a GenerationRun id for
+// GENERATE_EPICS, a DraftItem id for REGENERATE_ITEM, a Source id for
+// PARSE_SOURCE, etc.) — deliberately not a typed FK, since the same table
+// backs jobs whose result lives in different tables entirely.
+enum JobType {
+  GENERATE_EPICS
+  GENERATE_DOWNSTREAM
+  REGENERATE_ITEM
+  TARGETED_REGENERATE
+  PARSE_SOURCE
+  REPARSE_PROJECT
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
+model Job {
+  id            String    @id @default(cuid())
+  type          JobType
+  status        JobStatus @default(QUEUED)
+  workspaceId   String
+  projectId     String
+  // Free-form input the background task needs beyond the URL path params
+  // (e.g. REGENERATE_ITEM's reviewer-supplied context, GENERATE_DOWNSTREAM's
+  // optional item_types filter) — same role as a request body, persisted
+  // because the original HTTP request is long gone by the time this runs.
+  input         Json?
+  resultRef     String?
+  error         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  startedAt     DateTime?
+  finishedAt    DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id])
+  project   Project   @relation(fields: [projectId], references: [id])
+
+  @@index([projectId, type, status])
 }
 
 // Per-project publish configuration for a target tool (Epic 5: Jira first).

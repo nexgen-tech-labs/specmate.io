@@ -6,6 +6,7 @@ verifies only the affected items are touched."""
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -16,10 +17,30 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.core import db as db_module
 from app.core.config import settings
 from app.main import app
-from app.models import DraftItem, Project, RawRequirement, Source, SourceDiff, TraceLink, Workspace
+from app.models import DraftItem, Job, Project, RawRequirement, Source, SourceDiff, TraceLink, Workspace
 from app.routers.generation import AI_UNAVAILABLE_DETAIL, get_generation_adapter
 from app.services.ai.adapter import AIGenerationError, GenerationRequest, GenerationResult, UsageInfo
 from tests.audit_cleanup import purge_audit_events
+
+
+def _submit(client: TestClient, method: str, url: str, **kwargs: object) -> dict:
+    """See test_generation.py's identical helper for the full rationale
+    (TestClient runs BackgroundTasks synchronously; the engine must be
+    disposed between the enqueueing POST and the follow-up GET, since each
+    uses a separate blocking-portal event loop)."""
+    response = getattr(client, method)(url, **kwargs)
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+    _dispose_app_engine()
+    job = client.get(f"/jobs/{job_id}").json()
+    assert job["status"] in ("DONE", "FAILED"), job
+    return job
+
+
+def _submit_expect_done(client: TestClient, method: str, url: str, **kwargs: object) -> dict:
+    job = _submit(client, method, url, **kwargs)
+    assert job["status"] == "DONE", job["error"]
+    return json.loads(job["result_ref"])
 
 
 def _now() -> datetime:
@@ -235,6 +256,7 @@ async def _cleanup(ids: dict[str, object]) -> None:
             if item_ids:
                 await session.execute(delete(TraceLink).where(TraceLink.draftItemId.in_(item_ids)))
                 await session.execute(delete(DraftItem).where(DraftItem.id.in_(item_ids)))
+            await session.execute(delete(Job).where(Job.projectId == project_id))
             await session.execute(
                 delete(SourceDiff).where(SourceDiff.sourceId == str(ids["v2_source_id"]))
             )
@@ -269,7 +291,9 @@ def test_targeted_regeneration_touches_only_affected_items() -> None:
     app.dependency_overrides[get_generation_adapter] = lambda: FakeAdapter()
     client = TestClient(app)
     try:
-        response = client.post(
+        body = _submit_expect_done(
+            client,
+            "post",
             f"/sources/{ids['v2_source_id']}/targeted-regenerate",
             json={"workspace_id": str(ids["workspace_id"])},
         )
@@ -277,8 +301,6 @@ def test_targeted_regeneration_touches_only_affected_items() -> None:
         app.dependency_overrides.pop(get_generation_adapter, None)
         _dispose_app_engine()
 
-    assert response.status_code == 200
-    body = response.json()
     assert len(body["revised_item_ids"]) == 1
     assert len(body["new_item_ids"]) == 1
     assert body["flagged_removed_item_ids"] == [ids["removed_item_id"]]
@@ -320,7 +342,7 @@ def test_targeted_regeneration_touches_only_affected_items() -> None:
     asyncio.run(_cleanup(ids))
 
 
-def test_targeted_regeneration_returns_422_without_a_diff() -> None:
+def test_targeted_regeneration_fails_the_job_without_a_diff() -> None:
     async def make_bare_source() -> dict[str, str]:
         engine = create_async_engine(settings.database_url)
         try:
@@ -347,7 +369,9 @@ def test_targeted_regeneration_returns_422_without_a_diff() -> None:
     app.dependency_overrides[get_generation_adapter] = lambda: FakeAdapter()
     client = TestClient(app)
     try:
-        response = client.post(
+        job = _submit(
+            client,
+            "post",
             f"/sources/{ids['source_id']}/targeted-regenerate",
             json={"workspace_id": ids["workspace_id"]},
         )
@@ -355,12 +379,13 @@ def test_targeted_regeneration_returns_422_without_a_diff() -> None:
         app.dependency_overrides.pop(get_generation_adapter, None)
         _dispose_app_engine()
 
-    assert response.status_code == 422
+    assert job["status"] == "FAILED"
 
     async def cleanup() -> None:
         engine = create_async_engine(settings.database_url)
         try:
             async with AsyncSession(engine) as session:
+                await session.execute(delete(Job).where(Job.projectId == ids["project_id"]))
                 await session.execute(delete(Source).where(Source.id == ids["source_id"]))
                 await session.execute(delete(Project).where(Project.id == ids["project_id"]))
                 await purge_audit_events(session, ids["workspace_id"])
@@ -372,13 +397,15 @@ def test_targeted_regeneration_returns_422_without_a_diff() -> None:
     asyncio.run(cleanup())
 
 
-def test_targeted_regenerate_returns_503_when_ai_generation_fails() -> None:
+def test_targeted_regenerate_fails_the_job_when_ai_generation_fails() -> None:
     ids = asyncio.run(_build_fixture())
 
     app.dependency_overrides[get_generation_adapter] = lambda: FailingAdapter()
     client = TestClient(app)
     try:
-        response = client.post(
+        job = _submit(
+            client,
+            "post",
             f"/sources/{ids['v2_source_id']}/targeted-regenerate",
             json={"workspace_id": str(ids["workspace_id"])},
         )
@@ -386,8 +413,8 @@ def test_targeted_regenerate_returns_503_when_ai_generation_fails() -> None:
         app.dependency_overrides.pop(get_generation_adapter, None)
         _dispose_app_engine()
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == AI_UNAVAILABLE_DETAIL
-    assert "SECRET-LOOKING-TOKEN" not in response.text
+    assert job["status"] == "FAILED"
+    assert job["error"] == AI_UNAVAILABLE_DETAIL
+    assert "SECRET-LOOKING-TOKEN" not in (job["error"] or "")
 
     asyncio.run(_cleanup(ids))
