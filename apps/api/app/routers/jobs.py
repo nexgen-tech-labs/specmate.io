@@ -21,6 +21,8 @@ class JobResponse(BaseModel):
     id: str
     type: str
     status: str
+    workspace_id: str
+    project_id: str
     result_ref: str | None
     error: str | None
     created_at: str
@@ -33,6 +35,8 @@ def _to_response(job: Job) -> JobResponse:
         id=job.id,
         type=job.type.value,
         status=job.status.value,
+        workspace_id=job.workspaceId,
+        project_id=job.projectId,
         result_ref=job.resultRef,
         error=job.error,
         created_at=job.createdAt.isoformat(),

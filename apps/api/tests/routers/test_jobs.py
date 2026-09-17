@@ -86,6 +86,8 @@ def test_get_job_returns_the_job_status_and_result_ref() -> None:
         assert body["id"] == ids["job_id"]
         assert body["type"] == "GENERATE_EPICS"
         assert body["status"] == "DONE"
+        assert body["workspace_id"] == ids["workspace_id"]
+        assert body["project_id"] == ids["project_id"]
         assert body["result_ref"] == "generation-run-abc"
         assert body["error"] is None
         assert body["started_at"] is not None

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { requireProjectRole } from '@/lib/workspace-context';
 import { markGapResolved } from '@/lib/review';
+import { awaitJob, JobPollTimeoutError } from '@/lib/jobs';
 
 type Params = { params: Promise<{ workspaceId: string; projectId: string; itemId: string }> };
 
@@ -61,17 +62,34 @@ export async function POST(request: Request, { params }: Params) {
         { status: 502 },
       );
     }
-    const regenBody = (await regen.json()) as { new_item_id?: string; detail?: string };
-    if (!regen.ok || !regenBody.new_item_id) {
-      return NextResponse.json(
-        { error: regenBody.detail ?? 'Regeneration failed.' },
-        { status: regen.status },
-      );
+    const enqueueBody = (await regen.json().catch(() => ({}))) as { job_id?: string };
+    if (!regen.ok || !enqueueBody.job_id) {
+      return NextResponse.json({ error: 'Regeneration failed.' }, { status: regen.status || 502 });
+    }
+    // Single-item regeneration is one small AI call — fast enough to poll
+    // internally and keep this route's response shape unchanged for the
+    // reviewer UI, unlike the dashboard's Generate button (which can run
+    // clustering over a whole project and genuinely needs client-side
+    // polling instead — see apps/web/src/lib/jobs.ts's module docstring).
+    let job;
+    try {
+      job = await awaitJob(enqueueBody.job_id);
+    } catch (err) {
+      if (err instanceof JobPollTimeoutError) {
+        return NextResponse.json(
+          { error: 'Regeneration is taking longer than expected — try again shortly.' },
+          { status: 504 },
+        );
+      }
+      throw err;
+    }
+    if (job.status === 'FAILED' || !job.result_ref) {
+      return NextResponse.json({ error: job.error ?? 'Regeneration failed.' }, { status: 502 });
     }
     // The regenerated revision inherits the flags — clear the now-answered gap on it.
-    const result = await markGapResolved(regenBody.new_item_id, 'regenerated', actor);
+    const result = await markGapResolved(job.result_ref, 'regenerated', actor);
     if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-    return NextResponse.json({ ok: true, item_id: regenBody.new_item_id });
+    return NextResponse.json({ ok: true, item_id: job.result_ref });
   }
 
   return NextResponse.json({ error: 'resolution must be manual or regenerate.' }, { status: 400 });

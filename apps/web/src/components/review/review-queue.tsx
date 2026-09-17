@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ReviewRunGroup } from '@/components/review/review-run-group';
+import { pollJobFromBrowser } from '@/lib/poll-job';
 
 export interface ReviewItem {
   id: string;
@@ -118,9 +119,22 @@ export function ReviewQueue({
         `/api/workspaces/${workspaceId}/projects/${projectId}/generation-runs/${latestRunId}/generate-downstream`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
       );
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
-        setDownstreamError(body.detail ?? body.error ?? 'Generation failed — try again.');
+      const payload = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        detail?: string;
+        job_id?: string;
+      };
+      if (!res.ok || !payload.job_id) {
+        setDownstreamError(payload.detail ?? payload.error ?? 'Generation failed — try again.');
+        return;
+      }
+      // Stories/tasks/supporting items + scoring for a run's approved epics
+      // can run long enough on a large run to have caused the same 504 the
+      // epics-only Generate button hit — this now enqueues a background job
+      // and polls for the outcome instead of blocking the request.
+      const job = await pollJobFromBrowser(payload.job_id);
+      if (job.status === 'FAILED') {
+        setDownstreamError(job.error ?? 'Generation failed — try again.');
         return;
       }
       router.refresh();

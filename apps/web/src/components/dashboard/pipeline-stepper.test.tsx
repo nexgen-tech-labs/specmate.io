@@ -9,6 +9,20 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push, refresh }),
 }));
 
+const pollJobFromBrowser = vi.fn();
+vi.mock('@/lib/poll-job', () => ({
+  pollJobFromBrowser: (...args: unknown[]) => pollJobFromBrowser(...args),
+}));
+
+function mockDoneJob(resultRef = 'run-1') {
+  pollJobFromBrowser.mockResolvedValue({
+    id: 'job-1',
+    status: 'DONE',
+    result_ref: resultRef,
+    error: null,
+  });
+}
+
 const EMPTY_PIPELINE: PipelineSummary = {
   activeKey: 'ingest',
   stages: [
@@ -29,6 +43,7 @@ describe('PipelineStepper generate action', () => {
   beforeEach(() => {
     refresh.mockClear();
     push.mockClear();
+    pollJobFromBrowser.mockReset();
     vi.unstubAllGlobals();
   });
 
@@ -50,11 +65,16 @@ describe('PipelineStepper generate action', () => {
     expect(screen.queryByRole('button', { name: /generate/i })).toBeNull();
   });
 
-  it('shows a Generate button once a source exists, and triggers /generate on click', async () => {
+  it('shows a Generate button once a source exists, enqueues a job, and navigates to review once it completes', async () => {
+    // defaultProjectId is set here, so reviewHref is non-null — /generate
+    // always produces EPICS_PENDING_REVIEW on success, so a DONE job always
+    // navigates to review (router.refresh() is the no-reviewHref fallback,
+    // covered separately where reviewHref is null).
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({ ok: true, json: async () => ({ run_id: 'r1', stats: {} }) }),
+      vi.fn().mockResolvedValue({ ok: true, status: 202, json: async () => ({ job_id: 'job-1' }) }),
     );
+    mockDoneJob();
     render(
       <PipelineStepper
         pipeline={WITH_SOURCE_PIPELINE}
@@ -65,14 +85,17 @@ describe('PipelineStepper generate action', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /generate/i }));
 
-    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith('/workspaces/ws-1/projects/proj-1/review'),
+    );
     expect(global.fetch).toHaveBeenCalledWith(
       '/api/workspaces/ws-1/projects/proj-1/generate',
       expect.objectContaining({ method: 'POST' }),
     );
+    expect(pollJobFromBrowser).toHaveBeenCalledWith('job-1');
   });
 
-  it('shows an error and does not refresh when generation fails', async () => {
+  it('shows an error and does not refresh when enqueueing fails', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({ ok: false, json: async () => ({ detail: 'AI service down' }) }),
@@ -89,6 +112,34 @@ describe('PipelineStepper generate action', () => {
 
     await waitFor(() => expect(screen.getByText('AI service down')).toBeDefined());
     expect(refresh).not.toHaveBeenCalled();
+    expect(pollJobFromBrowser).not.toHaveBeenCalled();
+  });
+
+  it('shows an error and does not refresh when the job itself fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 202, json: async () => ({ job_id: 'job-1' }) }),
+    );
+    pollJobFromBrowser.mockResolvedValue({
+      id: 'job-1',
+      status: 'FAILED',
+      result_ref: null,
+      error: 'AI generation is temporarily unavailable.',
+    });
+    render(
+      <PipelineStepper
+        pipeline={WITH_SOURCE_PIPELINE}
+        workspaceId="ws-1"
+        defaultProjectId="proj-1"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText('AI generation is temporarily unavailable.')).toBeDefined(),
+    );
+    expect(refresh).not.toHaveBeenCalled();
   });
 });
 
@@ -96,6 +147,7 @@ describe('PipelineStepper step navigation', () => {
   beforeEach(() => {
     refresh.mockClear();
     push.mockClear();
+    pollJobFromBrowser.mockReset();
     vi.unstubAllGlobals();
   });
 
@@ -144,6 +196,7 @@ describe('PipelineStepper staged-generation navigation', () => {
   beforeEach(() => {
     refresh.mockClear();
     push.mockClear();
+    pollJobFromBrowser.mockReset();
     vi.unstubAllGlobals();
   });
 
@@ -165,14 +218,12 @@ describe('PipelineStepper staged-generation navigation', () => {
     expect(push).toHaveBeenCalledWith('/workspaces/ws-1/projects/proj-1/review');
   });
 
-  it('navigates to review after a fresh generate call returns EPICS_PENDING_REVIEW', async () => {
+  it('navigates to review once a fresh generate job completes', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ run_id: 'run-1', stage: 'EPICS_PENDING_REVIEW', stats: {} }),
-      }),
+      vi.fn().mockResolvedValue({ ok: true, status: 202, json: async () => ({ job_id: 'job-1' }) }),
     );
+    mockDoneJob('run-1');
     render(
       <PipelineStepper
         pipeline={WITH_SOURCE_PIPELINE}

@@ -7,6 +7,11 @@ vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), refresh }),
 }));
 
+const pollJobFromBrowser = vi.fn();
+vi.mock('@/lib/poll-job', () => ({
+  pollJobFromBrowser: (...args: unknown[]) => pollJobFromBrowser(...args),
+}));
+
 function renderQueue(overrides: Partial<Parameters<typeof ReviewQueue>[0]> = {}) {
   return render(
     <ReviewQueue
@@ -119,6 +124,7 @@ describe('ReviewQueue empty states', () => {
 describe('ReviewQueue staged-generation banner', () => {
   beforeEach(() => {
     refresh.mockClear();
+    pollJobFromBrowser.mockReset();
     vi.unstubAllGlobals();
   });
 
@@ -133,8 +139,12 @@ describe('ReviewQueue staged-generation banner', () => {
     expect(screen.getByRole('button', { name: /generate stories & tasks/i })).toBeDisabled();
   });
 
-  it('enables the button once at least one epic is approved, and calls generate-downstream then refreshes', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }));
+  it('enables the button once at least one epic is approved, enqueues a job, and refreshes once it completes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 202, json: async () => ({ job_id: 'job-1' }) }),
+    );
+    pollJobFromBrowser.mockResolvedValue({ status: 'DONE', result_ref: 'run-1', error: null });
     renderQueue({
       latestRunId: 'run-1',
       latestRunStage: 'EPICS_PENDING_REVIEW',
@@ -154,9 +164,10 @@ describe('ReviewQueue staged-generation banner', () => {
       '/api/workspaces/ws-1/projects/proj-1/generation-runs/run-1/generate-downstream',
       expect.objectContaining({ method: 'POST' }),
     );
+    expect(pollJobFromBrowser).toHaveBeenCalledWith('job-1');
   });
 
-  it('shows an error and does not refresh when generate-downstream fails', async () => {
+  it('shows an error and does not refresh when enqueueing generate-downstream fails', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({ ok: false, json: async () => ({ detail: 'No approved epics' }) }),
@@ -171,6 +182,32 @@ describe('ReviewQueue staged-generation banner', () => {
     fireEvent.click(screen.getByRole('button', { name: /generate stories & tasks/i }));
 
     await waitFor(() => expect(screen.getByText('No approved epics')).toBeInTheDocument());
+    expect(refresh).not.toHaveBeenCalled();
+    expect(pollJobFromBrowser).not.toHaveBeenCalled();
+  });
+
+  it('shows an error and does not refresh when the generate-downstream job itself fails', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 202, json: async () => ({ job_id: 'job-1' }) }),
+    );
+    pollJobFromBrowser.mockResolvedValue({
+      status: 'FAILED',
+      result_ref: null,
+      error: 'AI generation is temporarily unavailable.',
+    });
+    renderQueue({
+      latestRunId: 'run-1',
+      latestRunStage: 'EPICS_PENDING_REVIEW',
+      totalItemCount: 1,
+      items: [epicItem({ id: 'epic-1', status: 'APPROVED' })],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /generate stories & tasks/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText('AI generation is temporarily unavailable.')).toBeInTheDocument(),
+    );
     expect(refresh).not.toHaveBeenCalled();
   });
 

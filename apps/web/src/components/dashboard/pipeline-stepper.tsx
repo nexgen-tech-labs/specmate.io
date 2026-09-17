@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Stepper, type StepperStep } from '@/components/layout/stepper';
 import type { PipelineSummary } from '@/lib/dashboard';
+import { pollJobFromBrowser } from '@/lib/poll-job';
 
 interface PipelineStepperProps {
   pipeline: PipelineSummary;
@@ -71,17 +72,32 @@ export function PipelineStepper({
         `/api/workspaces/${workspaceId}/projects/${defaultProjectId}/generate`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
       );
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
-        setError(body.detail ?? body.error ?? 'Generation failed — try again.');
+      const payload = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        detail?: string;
+        job_id?: string;
+      };
+      if (!res.ok || !payload.job_id) {
+        setError(payload.detail ?? payload.error ?? 'Generation failed — try again.');
         return;
       }
-      const payload = (await res.json()) as { stage?: string };
-      if (payload.stage === 'EPICS_PENDING_REVIEW' && reviewHref) {
-        router.push(reviewHref);
+      // Clustering can run long enough on a large project that the old
+      // blocking request outlasted both the AI client's own timeout and
+      // Azure Container Apps' ingress timeout (a real production 504) —
+      // /generate now enqueues a background job and returns 202
+      // immediately; this polls for the actual outcome instead.
+      const job = await pollJobFromBrowser(payload.job_id);
+      if (job.status === 'FAILED') {
+        setError(job.error ?? 'Generation failed — try again.');
         return;
       }
-      router.refresh();
+      // reviewHref is always set here — the Generate button (and this
+      // function's own defaultProjectId guard above) only exist/proceed
+      // when defaultProjectId is set, which is reviewHref's only condition.
+      // generate_epics also always produces EPICS_PENDING_REVIEW on
+      // success, so navigating to review unconditionally on a DONE job
+      // matches the old response-shape check's actual real-world outcome.
+      if (reviewHref) router.push(reviewHref);
     } catch {
       setError('Could not reach the generation service — try again.');
     } finally {

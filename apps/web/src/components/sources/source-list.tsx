@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { pollJobFromBrowser } from '@/lib/poll-job';
 
 export interface SourceRow {
   id: string;
@@ -45,19 +46,33 @@ export function SourceList({
   async function targetedRegenerate(sourceId: string) {
     setBusyId(sourceId);
     setActionError(null);
-    const res = await fetch(
-      `/api/workspaces/${workspaceId}/projects/${projectId}/sources/${sourceId}/targeted-regenerate`,
-      { method: 'POST' },
-    );
-    setBusyId(null);
-    if (!res.ok) {
-      const body: { error?: string; detail?: string } = await res.json().catch(() => ({}));
-      setActionError(body.detail ?? body.error ?? 'Targeted regeneration failed.');
-      return;
+    try {
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/projects/${projectId}/sources/${sourceId}/targeted-regenerate`,
+        { method: 'POST' },
+      );
+      const payload: { error?: string; detail?: string; job_id?: string } = await res
+        .json()
+        .catch(() => ({}));
+      if (!res.ok || !payload.job_id) {
+        setActionError(payload.detail ?? payload.error ?? 'Targeted regeneration failed.');
+        return;
+      }
+      // Diffing/regenerating only the affected items is still an AI call
+      // over however much content changed — enqueued as a background job
+      // like every other generation-triggering action; poll for the
+      // outcome before navigating to the delta review page.
+      const job = await pollJobFromBrowser(payload.job_id);
+      if (job.status === 'FAILED') {
+        setActionError(job.error ?? 'Targeted regeneration failed.');
+        return;
+      }
+      router.push(
+        `/workspaces/${workspaceId}/projects/${projectId}/sources/${sourceId}/delta-review`,
+      );
+    } finally {
+      setBusyId(null);
     }
-    router.push(
-      `/workspaces/${workspaceId}/projects/${projectId}/sources/${sourceId}/delta-review`,
-    );
   }
 
   async function reparse(sourceId: string) {
