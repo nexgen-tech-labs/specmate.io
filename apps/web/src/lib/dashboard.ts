@@ -40,15 +40,53 @@ export interface PipelineSummary {
   activeKey: PipelineStageCount['key'];
 }
 
+/**
+ * The "drafted" stat used to count every non-deleted DraftItem ever created
+ * for the project — it only ever grew, and never reset or re-scoped when a
+ * new source was added or a fresh generation run happened (Issue #116).
+ * Scopes it instead to: items belonging to the LATEST GenerationRun per
+ * accessible project, plus any item with no generationRunId at all (predates
+ * run-tracking, or was created outside the normal generate_epics/
+ * generate_downstream flow — still legitimately "drafted," just not
+ * attributable to a specific run, so it must not silently disappear from the
+ * count). Items belonging to an OLDER, non-latest run are excluded — that's
+ * the actual stale content this fix is removing from the live number.
+ */
+async function getLatestGenerationRunIdsByProject(
+  workspaceId: string,
+  accessibleProjectIds: ProjectScope,
+): Promise<string[]> {
+  const projects = await prisma.project.findMany({
+    where: projectWhere(workspaceId, accessibleProjectIds),
+    select: { id: true },
+  });
+  const latestRuns = await Promise.all(
+    projects.map((p) =>
+      prisma.generationRun.findFirst({
+        where: { projectId: p.id },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      }),
+    ),
+  );
+  return latestRuns.flatMap((run) => (run ? [run.id] : []));
+}
+
 export async function getPipelineCounts(
   workspaceId: string,
   accessibleProjectIds: ProjectScope,
 ): Promise<PipelineSummary> {
   const projectFilter = { project: projectWhere(workspaceId, accessibleProjectIds) };
+  const latestRunIds = await getLatestGenerationRunIdsByProject(workspaceId, accessibleProjectIds);
+  const currentGenerationFilter = {
+    OR: [{ generationRunId: { in: latestRunIds } }, { generationRunId: null }],
+  };
 
   const [sourceCount, draftedCount, pendingCount, publishedCount] = await Promise.all([
     prisma.source.count({ where: { deletedAt: null, ...projectFilter } }),
-    prisma.draftItem.count({ where: { deletedAt: null, ...projectFilter } }),
+    prisma.draftItem.count({
+      where: { deletedAt: null, ...projectFilter, ...currentGenerationFilter },
+    }),
     prisma.draftItem.count({ where: { deletedAt: null, status: 'PENDING', ...projectFilter } }),
     prisma.publishedItem.count({ where: { deletedAt: null, draftItem: projectFilter } }),
   ]);

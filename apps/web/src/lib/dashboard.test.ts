@@ -148,6 +148,73 @@ describe('dashboard aggregation', () => {
     expect(byKey.publish).toBe(0); // the published item is in projectB, out of scope
   });
 
+  it('getPipelineCounts excludes draft items from a superseded generation run (Issue #116)', async () => {
+    const project = await prisma.project.create({
+      data: { workspaceId: workspace.id, name: 'Dashboard Test Project C' },
+    });
+
+    const olderRun = await prisma.generationRun.create({
+      data: {
+        projectId: project.id,
+        contentHash: 'hash-older',
+        promptVersion: 'v1',
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+      },
+    });
+    const latestRun = await prisma.generationRun.create({
+      data: {
+        projectId: project.id,
+        contentHash: 'hash-latest',
+        promptVersion: 'v1',
+        createdAt: new Date('2026-02-01T00:00:00Z'),
+      },
+    });
+
+    await prisma.draftItem.create({
+      data: {
+        projectId: project.id,
+        generationRunId: olderRun.id,
+        type: 'STORY',
+        title: 'stale from older run',
+        description: 'd',
+        status: 'PENDING',
+      },
+    });
+    await prisma.draftItem.create({
+      data: {
+        projectId: project.id,
+        generationRunId: latestRun.id,
+        type: 'STORY',
+        title: 'from latest run',
+        description: 'd',
+        status: 'PENDING',
+      },
+    });
+    await prisma.draftItem.create({
+      data: {
+        projectId: project.id,
+        generationRunId: null,
+        type: 'STORY',
+        title: 'unattributed (no run)',
+        description: 'd',
+        status: 'PENDING',
+      },
+    });
+
+    try {
+      const summary = await getPipelineCounts(workspace.id, new Set([project.id]));
+      const byKey = Object.fromEntries(summary.stages.map((s) => [s.key, s.count]));
+      // 3 draft items exist for this project, but only 2 should count:
+      // the latest run's item and the unattributed item. The older run's
+      // item is the stale content Issue #116 is about.
+      expect(byKey.generation).toBe(2);
+    } finally {
+      await prisma.draftItem.deleteMany({ where: { projectId: project.id } });
+      await prisma.generationRun.deleteMany({ where: { projectId: project.id } });
+      await prisma.project.delete({ where: { id: project.id } });
+    }
+  });
+
   it('getSourcesSummary counts and lists sources across accessible projects', async () => {
     const summary = await getSourcesSummary(workspace.id, null);
     expect(summary.total).toBe(2);
