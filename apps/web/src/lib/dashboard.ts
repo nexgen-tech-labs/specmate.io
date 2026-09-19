@@ -246,6 +246,55 @@ export async function getRecentlyPublishedBatches(
   return [...buckets.values()].sort((a, b) => b.when.getTime() - a.when.getTime()).slice(0, take);
 }
 
+export interface PreviouslyDraftedProject {
+  projectId: string;
+  projectName: string;
+  count: number;
+}
+
+/**
+ * Issue #117: items from a superseded GenerationRun no longer count toward
+ * the live "drafted" stat (Issue #116) but still represent real outstanding
+ * work — they haven't been published and haven't necessarily been decided.
+ * Surfaces them per project so the dashboard can point back at each
+ * project's Review page (which already groups every run, including
+ * superseded ones, into an editable per-run section).
+ */
+export async function getPreviouslyDraftedSummary(
+  workspaceId: string,
+  accessibleProjectIds: ProjectScope,
+): Promise<PreviouslyDraftedProject[]> {
+  const projects = await prisma.project.findMany({
+    where: projectWhere(workspaceId, accessibleProjectIds),
+    select: { id: true, name: true },
+  });
+
+  const results = await Promise.all(
+    projects.map(async (project) => {
+      const latestRun = await prisma.generationRun.findFirst({
+        where: { projectId: project.id },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      });
+      if (!latestRun) return null;
+
+      const count = await prisma.draftItem.count({
+        where: {
+          projectId: project.id,
+          deletedAt: null,
+          generationRunId: { not: latestRun.id },
+          NOT: { generationRunId: null },
+        },
+      });
+      if (count === 0) return null;
+
+      return { projectId: project.id, projectName: project.name, count };
+    }),
+  );
+
+  return results.filter((r): r is PreviouslyDraftedProject => r !== null);
+}
+
 export interface QualityScoreSummary {
   average: number | null;
   bands: Array<{ label: string; count: number; color: 'green' | 'amber' | 'red' }>;

@@ -9,6 +9,7 @@ import {
   getOrCreateDefaultProjectId,
   getPendingGenerationRunId,
   getPipelineCounts,
+  getPreviouslyDraftedSummary,
   getQualityScoreSummary,
   getRecentlyPublishedBatches,
   getSourcesSummary,
@@ -45,17 +46,27 @@ export default async function WorkspaceDashboardPage({
 
   const accessibleProjectIds = await getAccessibleProjectIds(workspaceId, access.membership);
 
-  const [pipeline, sources, review, published, quality, activity, integrations, usage] =
-    await Promise.all([
-      getPipelineCounts(workspaceId, accessibleProjectIds),
-      getSourcesSummary(workspaceId, accessibleProjectIds),
-      getAwaitingReviewSummary(workspaceId, accessibleProjectIds),
-      getRecentlyPublishedBatches(workspaceId, accessibleProjectIds),
-      getQualityScoreSummary(workspaceId, accessibleProjectIds),
-      getActivityFeed(workspaceId),
-      getIntegrationsSummary(workspace.organizationId, workspaceId),
-      getWorkspaceUsageSummary(workspaceId),
-    ]);
+  const [
+    pipeline,
+    sources,
+    review,
+    published,
+    previouslyDrafted,
+    quality,
+    activity,
+    integrations,
+    usage,
+  ] = await Promise.all([
+    getPipelineCounts(workspaceId, accessibleProjectIds),
+    getSourcesSummary(workspaceId, accessibleProjectIds),
+    getAwaitingReviewSummary(workspaceId, accessibleProjectIds),
+    getRecentlyPublishedBatches(workspaceId, accessibleProjectIds),
+    getPreviouslyDraftedSummary(workspaceId, accessibleProjectIds),
+    getQualityScoreSummary(workspaceId, accessibleProjectIds),
+    getActivityFeed(workspaceId),
+    getIntegrationsSummary(workspace.organizationId, workspaceId),
+    getWorkspaceUsageSummary(workspaceId),
+  ]);
 
   // Resolving (or lazily creating) a default project only when actually
   // needed avoids writing to the DB on every dashboard view — the Add Source
@@ -122,6 +133,7 @@ export default async function WorkspaceDashboardPage({
           sources={sources}
           review={review}
           published={published}
+          previouslyDrafted={previouslyDrafted}
           quality={quality}
           activity={activity}
           integrations={integrations}

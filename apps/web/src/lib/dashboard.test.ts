@@ -6,6 +6,7 @@ import {
   getIntegrationsSummary,
   getOrCreateDefaultProjectId,
   getPipelineCounts,
+  getPreviouslyDraftedSummary,
   getQualityScoreSummary,
   getRecentlyPublishedBatches,
   getSourcesSummary,
@@ -213,6 +214,77 @@ describe('dashboard aggregation', () => {
       await prisma.generationRun.deleteMany({ where: { projectId: project.id } });
       await prisma.project.delete({ where: { id: project.id } });
     }
+  });
+
+  it('getPreviouslyDraftedSummary surfaces items from a superseded run, keyed by project (Issue #117)', async () => {
+    const project = await prisma.project.create({
+      data: { workspaceId: workspace.id, name: 'Dashboard Test Project D' },
+    });
+
+    const olderRun = await prisma.generationRun.create({
+      data: {
+        projectId: project.id,
+        contentHash: 'hash-older-d',
+        promptVersion: 'v1',
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+      },
+    });
+    const latestRun = await prisma.generationRun.create({
+      data: {
+        projectId: project.id,
+        contentHash: 'hash-latest-d',
+        promptVersion: 'v1',
+        createdAt: new Date('2026-02-01T00:00:00Z'),
+      },
+    });
+
+    await prisma.draftItem.create({
+      data: {
+        projectId: project.id,
+        generationRunId: olderRun.id,
+        type: 'STORY',
+        title: 'stale from older run',
+        description: 'd',
+        status: 'PENDING',
+      },
+    });
+    await prisma.draftItem.create({
+      data: {
+        projectId: project.id,
+        generationRunId: latestRun.id,
+        type: 'STORY',
+        title: 'from latest run',
+        description: 'd',
+        status: 'PENDING',
+      },
+    });
+    await prisma.draftItem.create({
+      data: {
+        projectId: project.id,
+        generationRunId: null,
+        type: 'STORY',
+        title: 'unattributed (no run)',
+        description: 'd',
+        status: 'PENDING',
+      },
+    });
+
+    try {
+      const summary = await getPreviouslyDraftedSummary(workspace.id, new Set([project.id]));
+      // Only the older run's item counts as "previously drafted" — the
+      // latest run's item is current, and the unattributed item predates
+      // run-tracking entirely (neither is stale content).
+      expect(summary).toEqual([{ projectId: project.id, projectName: project.name, count: 1 }]);
+    } finally {
+      await prisma.draftItem.deleteMany({ where: { projectId: project.id } });
+      await prisma.generationRun.deleteMany({ where: { projectId: project.id } });
+      await prisma.project.delete({ where: { id: project.id } });
+    }
+  });
+
+  it('getPreviouslyDraftedSummary omits projects with only one generation run', async () => {
+    const summary = await getPreviouslyDraftedSummary(workspace.id, new Set([projectA.id]));
+    expect(summary).toEqual([]);
   });
 
   it('getSourcesSummary counts and lists sources across accessible projects', async () => {

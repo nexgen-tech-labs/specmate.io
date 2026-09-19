@@ -12,6 +12,7 @@ import {
 } from '@/components/dashboard/dashboard-nav-actions';
 import { AwaitingReviewCard } from '@/components/dashboard/awaiting-review-card';
 import { RecentlyPublishedCard } from '@/components/dashboard/recently-published-card';
+import { PreviouslyDraftedCard } from '@/components/dashboard/previously-drafted-card';
 import { QualityScoreCard } from '@/components/dashboard/quality-score-card';
 import { ActivityFeedCard } from '@/components/dashboard/activity-feed-card';
 import { UsageCard } from '@/components/dashboard/usage-card';
@@ -24,6 +25,7 @@ import type {
   AwaitingReviewSummary,
   IntegrationSummary,
   PipelineSummary,
+  PreviouslyDraftedProject,
   PublishedBatch,
   QualityScoreSummary,
   SourceSummaryItem,
@@ -49,6 +51,7 @@ export function DashboardClientShell({
   sources,
   review,
   published,
+  previouslyDrafted,
   quality,
   activity,
   integrations,
@@ -68,6 +71,7 @@ export function DashboardClientShell({
   sources: { total: number; recent: SourceSummaryItem[] };
   review: AwaitingReviewSummary;
   published: PublishedBatch[];
+  previouslyDrafted: PreviouslyDraftedProject[];
   quality: QualityScoreSummary;
   activity: ActivityFeedItem[];
   integrations: IntegrationSummary[];
@@ -159,6 +163,7 @@ export function DashboardClientShell({
           />
           <AwaitingReviewCard summary={review} reviewHref={reviewHref} />
           <RecentlyPublishedCard batches={published} />
+          <PreviouslyDraftedCard workspaceId={workspaceId} projects={previouslyDrafted} />
         </div>
         <div className="flex flex-col gap-5">
           <IntegrationsCardWithNav
